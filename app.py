@@ -8,9 +8,9 @@ from crawl4ai.extraction_strategy import LLMExtractionStrategy
 from pydantic import BaseModel
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
-import aiohttp
-import aiofiles
 import re
+import logging
+from urllib.robotparser import RobotFileParser
 
 # --------------------------- Helper Functions ---------------------------
 
@@ -22,20 +22,26 @@ def is_valid_url(url: str) -> bool:
     except:
         return False
 
-def can_crawl(url: str) -> bool:
-    """Check if crawling is allowed by robots.txt."""
+def can_crawl_robust(url: str, user_agent: str = '*') -> bool:
+    """Check if crawling is allowed by robots.txt using RobotFileParser."""
     try:
-        robots_url = urljoin(url, "/robots.txt")
-        response = requests.get(robots_url, timeout=5)
-        if response.status_code == 200:
-            # Simple parsing, consider using `urllib.robotparser` for more robust handling
-            disallow = re.findall(r'Disallow: (.*)', response.text, re.IGNORECASE)
-            for rule in disallow:
-                if rule.strip() == '/':
-                    return False
-            return True
-        return True  # Assume crawlable if no robots.txt
-    except:
+        parsed_url = urlparse(url)
+        robots_url = f"{parsed_url.scheme}://{parsed_url.netloc}/robots.txt"
+        rp = RobotFileParser()
+        rp.set_url(robots_url)
+        rp.read()
+        return rp.can_fetch(user_agent, url)
+    except Exception as e:
+        logger.warning(f"Could not parse robots.txt for {url}: {e}")
+        return False  # Conservative approach: disallow crawling if robots.txt cannot be parsed
+
+def is_url_accessible(url: str) -> bool:
+    """Check if the URL is accessible."""
+    try:
+        response = requests.head(url, timeout=10)
+        return response.status_code == 200
+    except requests.RequestException as e:
+        logger.error(f"Error accessing URL {url}: {e}")
         return False
 
 def parse_extracted_content(content: str) -> List[Dict]:
@@ -58,6 +64,17 @@ def parse_extracted_content(content: str) -> List[Dict]:
         soup = BeautifulSoup(content, "html.parser")
         texts = [p.get_text() for p in soup.find_all('p')]
         return [{"content": text} for text in texts if text]
+
+# --------------------------- Logging Configuration ---------------------------
+
+# Configure logging
+logging.basicConfig(
+    filename='app.log',
+    filemode='a',
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
 # --------------------------- Main App ---------------------------
 
@@ -88,6 +105,8 @@ with st.expander("Advanced Settings"):
     debug_mode = st.checkbox("Enable debug mode", value=False)
     wait_time = st.slider("Wait time between actions (seconds)", 1, 10, 3)
     concurrency_limit = st.number_input("Maximum concurrent requests", min_value=1, max_value=10, value=3)
+    retries = st.number_input("Number of retries on failure", min_value=0, max_value=5, value=3)
+    retry_delay = st.number_input("Delay between retries (seconds)", min_value=1, max_value=10, value=5)
 
 # Initialize session state for cancellation
 if 'cancel' not in st.session_state:
@@ -142,11 +161,11 @@ async def run_crawler(url: str, instruction: str, progress_callback):
                 async with semaphore:
                     if current_url in processed_urls:
                         if debug_mode:
-                            st.write(f"Already processed URL: {current_url}")
+                            logger.info(f"Already processed URL: {current_url}")
                         break
 
                     if debug_mode:
-                        st.write(f"Processing page {current_page}: {current_url}")
+                        logger.info(f"Processing page {current_page}: {current_url}")
 
                     processed_urls.add(current_url)
 
@@ -159,15 +178,22 @@ async def run_crawler(url: str, instruction: str, progress_callback):
                         exclude_external_links=True,
                     )
 
-                    # Get page content
-                    result = await crawler.arun(url=current_url, config=crawl_config)
+                    try:
+                        # Get page content
+                        result = await crawler.arun(url=current_url, config=crawl_config)
+                    except BrokenPipeError as bpe:
+                        logger.error(f"BrokenPipeError while processing {current_url}: {bpe}")
+                        return {"success": False, "error_message": f"BrokenPipeError: {str(bpe)}"}
+                    except Exception as e:
+                        logger.error(f"Unexpected error while processing {current_url}: {e}")
+                        return {"success": False, "error_message": str(e)}
 
                     if result.success:
                         # Parse the extracted content
                         page_results = parse_extracted_content(result.extracted_content)
 
                         if debug_mode:
-                            st.write(f"Extracted {len(page_results)} items from page {current_page}")
+                            logger.info(f"Extracted {len(page_results)} items from page {current_page}")
 
                         all_results.extend(page_results)
 
@@ -183,55 +209,83 @@ async def run_crawler(url: str, instruction: str, progress_callback):
 
                         if next_url and next_url != current_url:
                             if debug_mode:
-                                st.write(f"Found next page: {next_url}")
+                                logger.info(f"Found next page: {next_url}")
                             current_url = next_url
                             current_page += 1
                             await asyncio.sleep(wait_time)
                         else:
                             if debug_mode:
-                                st.write("No more pages found")
+                                logger.info("No more pages found")
                             break
                     else:
                         if debug_mode:
-                            st.write(f"Failed to process page {current_page}")
+                            logger.warning(f"Failed to process page {current_page}")
                         break
 
                 # Update progress
                 progress = current_page / max_pages
                 progress_callback(progress)
 
-            return {
-                "success": True,
-                "extracted_content": json.dumps(all_results, indent=2),
-                "current_page": current_page,
-                "total_pages": max_pages,
-                "total_items": len(all_results)
-            }
+        return {
+            "success": True,
+            "extracted_content": json.dumps(all_results, indent=2),
+            "current_page": current_page,
+            "total_pages": max_pages,
+            "total_items": len(all_results)
+        }
 
     except Exception as e:
         if debug_mode:
-            st.exception(e)
+            logger.exception("An unexpected error occurred in run_crawler.")
+        return {"success": False, "error_message": str(e)}
+
+async def run_crawler_with_retries(url: str, instruction: str, progress_callback, retries: int, delay: int):
+    for attempt in range(1, retries + 1):
+        logger.info(f"Attempt {attempt} of {retries}")
+        result = await run_crawler(url, instruction, progress_callback)
+        if result.get("success"):
+            return result
+        else:
+            logger.warning(f"Attempt {attempt} failed: {result.get('error_message')}")
+            if attempt < retries:
+                logger.info(f"Retrying in {delay} seconds...")
+                await asyncio.sleep(delay)
+    return {"success": False, "error_message": "All retry attempts failed."}
+
+def synchronous_run_crawler_with_retries(url, instruction, progress_callback, retries, delay):
+    try:
+        return asyncio.run(run_crawler_with_retries(url, instruction, progress_callback, retries, delay))
+    except BrokenPipeError as bpe:
+        logger.error(f"BrokenPipeError during asyncio.run: {bpe}")
+        return {"success": False, "error_message": f"BrokenPipeError: {str(bpe)}"}
+    except Exception as e:
+        logger.error(f"Unexpected error during asyncio.run: {e}")
         return {"success": False, "error_message": str(e)}
 
 # Handle crawling execution
 if url and instruction:
-    if st.button("🚀 Start Crawling"):
+    start_crawl = st.button("🚀 Start Crawling")
+    if start_crawl:
         if not is_valid_url(url):
             st.error("❌ Invalid URL. Please enter a valid URL with proper scheme (http/https).")
-        elif not can_crawl(url):
+        elif not can_crawl_robust(url):
             st.error("❌ Crawling is disallowed by the website's `robots.txt`.")
+        elif not is_url_accessible(url):
+            st.error("❌ The URL is not accessible. Please check the URL and try again.")
         else:
             st.session_state.cancel = False
             progress_bar = st.progress(0)
             status_text = st.empty()
 
-            async def execute_crawl():
-                result = await run_crawler(url, instruction, lambda p: progress_bar.progress(p))
-                return result
-
             try:
                 with st.spinner("⏳ Crawling the website... Please wait."):
-                    result = asyncio.run(execute_crawl())
+                    result = synchronous_run_crawler_with_retries(
+                        url,
+                        instruction,
+                        lambda p: progress_bar.progress(p),
+                        retries,
+                        retry_delay
+                    )
 
                 if result.get("success"):
                     st.success("✅ Crawling completed successfully!")
@@ -256,10 +310,8 @@ if url and instruction:
                     )
                 else:
                     st.error(f"⚠️ Error during crawling: {result.get('error_message', 'Unknown error')}")
-
             except Exception as e:
                 st.error(f"❌ Unexpected error: {e}")
-
             finally:
                 progress_bar.empty()
                 status_text.empty()
@@ -281,12 +333,13 @@ with st.expander("ℹ️ How to use this tool"):
         - Set the maximum number of pages to crawl.
         - Adjust wait time between page requests.
         - Set the maximum number of concurrent requests.
+        - Define the number of retries on failure and delay between retries.
         - Enable debug mode to see the extraction process.
     4. Click **'Start Crawling'** and wait for results.
     5. Preview and download the extracted data as JSON.
 
     🔹 *Enable debug mode to see detailed progress.*  
     🔹 *Increase wait time if the site loads slowly.*  
+    🔹 *Set retries and delay to handle transient network issues.*  
     ❗ *Ensure the website allows crawling by checking `robots.txt`.*
     """)
-
