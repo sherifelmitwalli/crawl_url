@@ -1,129 +1,99 @@
 import streamlit as st
 import asyncio
-import json
-from typing import Dict, Any
-from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
-from crawl4ai.extraction_strategy import LLMExtractionStrategy
+from playwright.async_api import async_playwright
 from pydantic import BaseModel
-import os
-
-# Install Playwright browsers
-os.system("playwright install")
-os.system("playwright install-deps")
+from typing import List
 
 # Set page title and icon
-st.set_page_config(page_title="Web Crawler", page_icon="🕷️", layout="wide")
+st.set_page_config(page_title="Consultation Responses Scraper", page_icon="🕷️", layout="wide")
 
-st.title("🔍 Web Crawler with AI")
+st.title("🔍 Consultation Responses Scraper")
 
-# Check if API keys are set
-if "OPENAI_API_KEY" not in st.secrets or "MODEL" not in st.secrets:
-    st.error("❌ Missing API credentials! Please set OPENAI_API_KEY and MODEL in the Streamlit secrets.")
-    st.markdown("""
-        **Steps to configure secrets:**
-        1. Go to your Streamlit dashboard.
-        2. Navigate to your app's settings.
-        3. Add the following under 'Secrets':
-            ```toml
-            OPENAI_API_KEY = "your_api_key"
-            MODEL = "gpt-4o-mini"
-            ```
-    """)
-    st.stop()
-
-# Load OpenAI model from secrets
-MODEL = st.secrets["MODEL"]
-OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
-
-# User input fields
-url = st.text_input("🌍 Enter URL to crawl:", placeholder="https://example.com")
-instruction = st.text_area(
-    "📝 Enter extraction instructions:",
-    placeholder="Example: Extract all product names and prices from the page."
-)
+# URL of the consultation page
+CONSULTATION_URL = "https://consult.gov.scot/environment-forestry/single-use-vapes/consultation/published_select_respondent"
 
 # Schema for extracted content
-class DynamicData(BaseModel):
-    content: Dict[str, Any]
+class ResponseData(BaseModel):
+    respondent_name: str
+    response_text: str
 
-# Async function to run the web crawler
-async def run_crawler(url: str, instruction: str):
+# Async function to scrape responses
+async def scrape_responses():
+    responses = []
     try:
-        llm_strategy = LLMExtractionStrategy(
-            provider=f"openai/{MODEL}",
-            api_token=OPENAI_API_KEY,
-            extraction_type="text",  # Using text mode for flexible extraction
-            instruction=instruction,
-            chunk_token_threshold=1000,
-            overlap_rate=0.0,
-            apply_chunking=True,
-            input_format="markdown",
-            extra_args={"temperature": 0.0, "max_tokens": 1000},
-        )
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page()
+            await page.goto(CONSULTATION_URL)
 
-        crawl_config = CrawlerRunConfig(
-            extraction_strategy=llm_strategy,
-            cache_mode=CacheMode.BYPASS,
-            process_iframes=False,
-            remove_overlay_elements=True,
-            exclude_external_links=True,
-        )
+            # Wait for the responses list to load
+            await page.wait_for_selector("div.response-list")
 
-        browser_cfg = BrowserConfig(headless=True, verbose=False)
+            # Extract links to individual responses
+            response_links = await page.query_selector_all("div.response-list a")
 
-        async with AsyncWebCrawler(config=browser_cfg) as crawler:
-            result = await crawler.arun(url=url, config=crawl_config)
-            return result
+            for link in response_links:
+                response_url = await link.get_attribute("href")
+                respondent_name = await link.inner_text()
 
+                # Navigate to the individual response page
+                response_page = await browser.new_page()
+                await response_page.goto(response_url)
+
+                # Extract the response text
+                response_text = await response_page.inner_text("div.response-text")
+
+                # Append the data to the list
+                responses.append(ResponseData(
+                    respondent_name=respondent_name,
+                    response_text=response_text
+                ))
+
+                await response_page.close()
+
+            await browser.close()
     except Exception as e:
-        return f"❌ Error: {str(e)}"
+        st.error(f"❌ Error during scraping: {str(e)}")
+    return responses
 
-# Handle crawling execution
-if url and instruction:
-    if st.button("🚀 Start Crawling"):
-        with st.spinner("⏳ Crawling the website... Please wait."):
-            try:
-                # Streamlit doesn't support `asyncio.run()`, so we use `asyncio.new_event_loop()`
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                result = loop.run_until_complete(run_crawler(url, instruction))
+# Streamlit UI
+if st.button("🚀 Start Scraping"):
+    with st.spinner("⏳ Scraping the consultation responses... Please wait."):
+        try:
+            # Run the scraper
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            scraped_data = loop.run_until_complete(scrape_responses())
 
-                if isinstance(result, str):  # Error case
-                    st.error(result)
-                elif result.success:
-                    st.success("✅ Crawling completed successfully!")
+            if scraped_data:
+                st.success("✅ Scraping completed successfully!")
 
-                    # Display extracted data
-                    data = json.loads(result.extracted_content)
-                    st.json(data)
+                # Display extracted data
+                for response in scraped_data:
+                    st.subheader(response.respondent_name)
+                    st.write(response.response_text)
 
-                    # Create a download button
-                    st.download_button(
-                        label="⬇️ Download Results",
-                        data=result.extracted_content,
-                        file_name="crawled_data.json",
-                        mime="application/json"
-                    )
-                else:
-                    st.error(f"⚠️ Error during crawling: {result.error_message}")
-
-            except ValueError as ve:
-                st.error(f"⚠️ Value error: {ve}")
-            except ConnectionError:
-                st.error("❌ Network issue. Please check your connection.")
-            except Exception as e:
-                st.error(f"❌ Unexpected error: {e}")
+                # Option to download the data
+                st.download_button(
+                    label="⬇️ Download Results",
+                    data="\n\n".join([f"{r.respondent_name}\n{r.response_text}" for r in scraped_data]),
+                    file_name="consultation_responses.txt",
+                    mime="text/plain"
+                )
+            else:
+                st.warning("⚠️ No responses found.")
+        except Exception as e:
+            st.error(f"❌ Unexpected error: {e}")
 
 # Add user instructions
 with st.expander("ℹ️ How to use this tool"):
     st.markdown("""
-    **Follow these steps:**
-    1. **Enter the URL** of the website you want to crawl.
-    2. **Provide detailed instructions** for data extraction.
-    3. Click **'Start Crawling'** and wait for results.
-    4. Download the extracted data as **JSON**.
+    **Instructions:**
+    1. Click **'Start Scraping'** to begin extracting consultation responses.
+    2. Wait for the process to complete.
+    3. View the extracted responses below.
+    4. Optionally, download the results as a text file.
 
-    🔹 *Ensure the website allows crawling by checking `robots.txt`.*  
-    ❗ *Crawling restricted or private websites may result in errors.*
+    🔹 *Ensure you have an active internet connection.*  
+    ❗ *This tool extracts publicly available responses from the specified consultation page.*
     """)
-
