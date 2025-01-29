@@ -15,8 +15,8 @@ class Product(BaseModel):
 
 async def scrape_data(url, instruction):
     llm_strategy = LLMExtractionStrategy(
-        provider="openai/gpt-4",
-        api_token=os.getenv("OPENAI_API_KEY"),
+        provider=st.secrets["MODEL"],
+        api_token=st.secrets["OPENAI_API_KEY"],
         schema=Product.model_json_schema(),
         extraction_type="schema",
         instruction=instruction,
@@ -42,10 +42,10 @@ async def scrape_data(url, instruction):
         return result
 
 # Set up the OpenAI API key
-openai.api_key = st.secrets["openai_api_key"]
+openai.api_key = st.secrets["OPENAI_API_KEY"]
 
 # Streamlit app
-st.title("AI assisted Crawling")
+st.title("AI Assisted Crawling")
 
 # User input
 url_to_scrape = st.text_input("Enter the URL to scrape:")
