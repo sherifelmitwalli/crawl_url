@@ -6,6 +6,7 @@ from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
 from crawl4ai.extraction_strategy import LLMExtractionStrategy
 from pydantic import BaseModel
 from bs4 import BeautifulSoup
+from urllib.parse import urljoin
 
 # Set page title and icon
 st.set_page_config(page_title="Web Crawler", page_icon="🕷️", layout="wide")
@@ -25,76 +26,39 @@ OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
 url = st.text_input("🌍 Enter URL to crawl:", placeholder="https://example.com")
 instruction = st.text_area(
     "📝 Enter extraction instructions:",
-    placeholder="Example: Extract all product names and prices from the page."
+    placeholder="Example: Extract all responses with their details."
 )
 
 # Additional crawler settings
 with st.expander("Advanced Settings"):
     max_pages = st.number_input("Maximum pages to crawl", min_value=1, value=10)
-    auto_detect = st.checkbox("Auto-detect selectors", value=True)
     debug_mode = st.checkbox("Enable debug mode", value=False)
-    
-    if not auto_detect:
-        next_page_selector = st.text_input(
-            "CSS Selector for next page button",
-            placeholder=".pagination .next"
-        )
-        click_selector = st.text_input(
-            "CSS Selector for clickable elements",
-            placeholder=".response-item"
-        )
     wait_time = st.slider("Wait time between actions (seconds)", 1, 10, 3)
 
-async def analyze_page_structure(html_content: str) -> Tuple[str, str]:
-    """
-    Analyze page structure to detect content and pagination patterns
-    """
-    soup = BeautifulSoup(html_content, 'html.parser')
-    
-    # Common content patterns (elements that likely contain responses)
-    content_patterns = [
-        ('article', {}),
-        ('div', {'class': ['post', 'response', 'comment', 'item', 'entry']}),
-        ('div', {'class': lambda x: x and any(word in x.lower() for word in ['response', 'comment', 'post', 'content'])}),
-    ]
-    
-    # Common pagination patterns
-    pagination_patterns = [
-        ('a', {'rel': 'next'}),
-        ('a', {'class': lambda x: x and 'next' in x.lower()}),
-        ('link', {'rel': 'next'}),
-        ('button', {'class': lambda x: x and 'next' in x.lower()}),
-    ]
-    
-    # Find content elements
-    content_selector = None
-    max_elements = 0
-    
-    for tag, attrs in content_patterns:
-        elements = soup.find_all(tag, attrs)
-        if len(elements) > max_elements:
-            # Get the CSS selector for this element type
-            if elements and elements[0].get('class'):
-                content_selector = f"{tag}.{'.'.join(elements[0]['class'])}"
-                max_elements = len(elements)
-    
-    # Find pagination element
-    next_page = None
-    for tag, attrs in pagination_patterns:
-        element = soup.find(tag, attrs)
-        if element:
-            if element.get('class'):
-                next_page = f"{tag}.{'.'.join(element['class'])}"
+def parse_extracted_content(content: str) -> List[Dict]:
+    """Parse and normalize the extracted content."""
+    try:
+        if isinstance(content, str):
+            data = json.loads(content)
+        else:
+            data = content
+
+        # Handle different JSON structures
+        if isinstance(data, dict):
+            if 'responses' in data:
+                return data['responses']
+            elif 'items' in data:
+                return data['items']
+            elif 'data' in data:
+                return data['data'] if isinstance(data['data'], list) else [data['data']]
             else:
-                next_page = tag
-            break
-    
-    if debug_mode:
-        st.write(f"Found {max_elements} potential content elements")
-        st.write(f"Content selector: {content_selector}")
-        st.write(f"Next page selector: {next_page}")
-    
-    return next_page, content_selector
+                return [data]
+        elif isinstance(data, list):
+            return data
+        else:
+            return [{"content": str(data)}]
+    except json.JSONDecodeError:
+        return [{"content": content}]
 
 async def run_crawler(url: str, instruction: str):
     try:
@@ -105,11 +69,15 @@ async def run_crawler(url: str, instruction: str):
             extraction_type="text",
             instruction=f"""
             {instruction}
-            Focus on extracting individual responses or entries. 
-            For each response, create a separate entry in the results.
-            Include all relevant details mentioned in the text.
+            Important: Extract each response or entry as a separate item.
+            Format the output as a JSON array where each item contains:
+            - The response content
+            - Any associated metadata (date, author, etc.)
+            - Any relevant details mentioned
+            
+            Format as: {{"responses": [{{response details}}, ...]}}
             """,
-            chunk_token_threshold=2000,  # Increased to handle larger content blocks
+            chunk_token_threshold=2000,
             overlap_rate=0.1,
             apply_chunking=True,
             input_format="markdown",
@@ -127,13 +95,21 @@ async def run_crawler(url: str, instruction: str):
         
         all_results = []
         current_page = 1
+        processed_urls = set()
         
         async with AsyncWebCrawler(config=browser_cfg) as crawler:
             current_url = url
             
-            while current_page <= max_pages:
+            while current_page <= max_pages and current_url:
+                if current_url in processed_urls:
+                    if debug_mode:
+                        st.write(f"Already processed URL: {current_url}")
+                    break
+                
                 if debug_mode:
-                    st.write(f"Crawling page {current_page}: {current_url}")
+                    st.write(f"Processing page {current_page}: {current_url}")
+                
+                processed_urls.add(current_url)
                 
                 # Configure crawler for current page
                 crawl_config = CrawlerRunConfig(
@@ -149,42 +125,29 @@ async def run_crawler(url: str, instruction: str):
                 
                 if result.success:
                     # Parse the extracted content
-                    try:
-                        extracted_data = json.loads(result.extracted_content)
-                        if debug_mode:
-                            st.write(f"Extracted data from page {current_page}:", extracted_data)
-                        
-                        # Handle different possible JSON structures
-                        if isinstance(extracted_data, dict):
-                            if 'responses' in extracted_data:
-                                all_results.extend(extracted_data['responses'])
-                            elif 'items' in extracted_data:
-                                all_results.extend(extracted_data['items'])
-                            else:
-                                all_results.append(extracted_data)
-                        elif isinstance(extracted_data, list):
-                            all_results.extend(extracted_data)
-                    except json.JSONDecodeError:
-                        if debug_mode:
-                            st.write("Failed to parse JSON, storing raw content")
-                        all_results.append({"content": result.extracted_content})
+                    page_results = parse_extracted_content(result.extracted_content)
                     
-                    # Analyze page structure for navigation
-                    next_page_link = None
-                    if result.page_content:
-                        next_selector, _ = await analyze_page_structure(result.page_content)
-                        if next_selector:
-                            for link in result.page_links:
-                                if 'next' in link.lower() or 'page' in link.lower():
-                                    next_page_link = link
-                                    break
+                    if debug_mode:
+                        st.write(f"Extracted {len(page_results)} items from page {current_page}")
                     
-                    if next_page_link:
-                        current_url = next_page_link
+                    all_results.extend(page_results)
+                    
+                    # Look for next page link in all available links
+                    next_url = None
+                    base_url = current_url
+                    
+                    # Get all links from the current page result
+                    for link in result.page_links:
+                        if link not in processed_urls and any(x in link.lower() for x in ['next', 'page', '?page=', 'paged']):
+                            next_url = urljoin(base_url, link)
+                            break
+                    
+                    if next_url and next_url != current_url:
+                        if debug_mode:
+                            st.write(f"Found next page: {next_url}")
+                        current_url = next_url
                         current_page += 1
                         await asyncio.sleep(wait_time)
-                        if debug_mode:
-                            st.write(f"Moving to next page: {current_url}")
                     else:
                         if debug_mode:
                             st.write("No more pages found")
@@ -250,16 +213,17 @@ with st.expander("ℹ️ How to use this tool"):
     st.markdown("""
     **Follow these steps:**
     1. **Enter the URL** of the website you want to crawl.
-    2. **Provide detailed instructions** for data extraction.
+    2. **Provide detailed instructions** for what to extract, for example:
+       - "Extract all responses including the content, author, and date"
+       - "Collect all comments with their associated metadata"
     3. Configure **Advanced Settings**:
-        - Enable/disable automatic selector detection
         - Set maximum pages to crawl
-        - Adjust wait time between actions
-        - Enable debug mode for detailed logging
+        - Adjust wait time between pages
+        - Enable debug mode to see the extraction process
     4. Click **'Start Crawling'** and wait for results.
     5. Preview and download the extracted data as JSON.
 
-    🔹 *Enable debug mode to see detailed extraction process.*  
-    🔹 *Adjust wait time if the site takes longer to load.*  
+    🔹 *Enable debug mode to see detailed progress.*  
+    🔹 *Increase wait time if the site loads slowly.*  
     ❗ *Ensure the website allows crawling by checking `robots.txt`.*
     """)
