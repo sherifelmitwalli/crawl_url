@@ -1,7 +1,7 @@
 import streamlit as st
 import asyncio
 import json
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
 from crawl4ai.extraction_strategy import LLMExtractionStrategy
 from pydantic import BaseModel
@@ -27,7 +27,7 @@ if "OPENAI_API_KEY" not in st.secrets or "MODEL" not in st.secrets:
     st.stop()
 
 # Load OpenAI model from secrets
-MODEL = st.secrets["MODEL"]
+MODEL_NAME = st.secrets["MODEL"]
 OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
 
 # User input fields
@@ -40,20 +40,123 @@ instruction = st.text_area(
 # Additional crawler settings
 with st.expander("Advanced Settings"):
     max_pages = st.number_input("Maximum pages to crawl", min_value=1, value=10)
-    next_page_selector = st.text_input(
-        "CSS Selector for next page button",
-        placeholder=".pagination .next"
-    )
-    click_selector = st.text_input(
-        "CSS Selector for clickable elements",
-        placeholder=".response-item"
-    )
+    auto_detect = st.checkbox("Auto-detect selectors", value=True)
+    
+    # Only show manual selector inputs if auto-detect is disabled
+    if not auto_detect:
+        next_page_selector = st.text_input(
+            "CSS Selector for next page button",
+            placeholder=".pagination .next"
+        )
+        click_selector = st.text_input(
+            "CSS Selector for clickable elements",
+            placeholder=".response-item"
+        )
     wait_time = st.slider("Wait time between actions (seconds)", 1, 10, 3)
 
 class ExtractedData(BaseModel):
     data: Dict[str, Any]
     current_page: int
     total_pages: int
+
+async def detect_selectors(crawler: AsyncWebCrawler) -> Tuple[str, str]:
+    """
+    Automatically detect pagination and clickable element selectors.
+    Returns tuple of (next_page_selector, clickable_elements_selector)
+    """
+    # Common patterns for pagination and clickable elements
+    pagination_patterns = [
+        # Common next page button patterns
+        """
+        () => {
+            const patterns = [
+                'a[rel="next"]',
+                '.pagination .next',
+                '.pagination-next',
+                'a:contains("Next")',
+                'button:contains("Next")',
+                '.next-page',
+                '[aria-label="Next page"]',
+                '.pagination li:last-child a',
+                '.page-next',
+                '[data-testid="pagination-next"]'
+            ];
+            
+            for (let pattern of patterns) {
+                const element = document.querySelector(pattern);
+                if (element) return pattern;
+            }
+            
+            // Look for links/buttons containing "next" or "→"
+            const elements = Array.from(document.querySelectorAll('a, button'));
+            for (let el of elements) {
+                if (el.textContent.toLowerCase().includes('next') || 
+                    el.textContent.includes('→') ||
+                    el.getAttribute('aria-label')?.toLowerCase().includes('next')) {
+                    return el.tagName.toLowerCase() + 
+                           (el.className ? '.' + el.className.split(' ').join('.') : '');
+                }
+            }
+            
+            return null;
+        }
+        """
+    ]
+
+    clickable_patterns = [
+        # Common clickable element patterns
+        """
+        () => {
+            // Look for repeated structural patterns
+            const patterns = new Map();
+            
+            // Find elements that appear multiple times with similar structure
+            const elements = document.querySelectorAll('*');
+            for (let el of elements) {
+                if (!el.className) continue;
+                
+                const siblings = document.querySelectorAll('.' + el.className.split(' ').join('.'));
+                if (siblings.length > 1) {
+                    // Check if elements contain interactive content
+                    const hasContent = Array.from(siblings).some(sib => {
+                        const text = sib.textContent.trim();
+                        const hasLinks = sib.querySelector('a');
+                        const isClickable = window.getComputedStyle(sib).cursor === 'pointer';
+                        return text.length > 20 && (hasLinks || isClickable);
+                    });
+                    
+                    if (hasContent) {
+                        patterns.set('.' + el.className.split(' ').join('.'), siblings.length);
+                    }
+                }
+            }
+            
+            // Return the selector with the most matches
+            return Array.from(patterns.entries())
+                .sort((a, b) => b[1] - a[1])
+                [0]?.[0] || null;
+        }
+        """
+    ]
+
+    next_page_selector = None
+    clickable_selector = None
+
+    # Try each pagination pattern
+    for pattern in pagination_patterns:
+        result = await crawler.browser_context.evaluate(pattern)
+        if result:
+            next_page_selector = result
+            break
+
+    # Try each clickable pattern
+    for pattern in clickable_patterns:
+        result = await crawler.browser_context.evaluate(pattern)
+        if result:
+            clickable_selector = result
+            break
+
+    return next_page_selector, clickable_selector
 
 async def click_and_extract(crawler: AsyncWebCrawler, url: str, config: CrawlerRunConfig, selector: str):
     results = []
@@ -107,20 +210,37 @@ async def run_crawler(url: str, instruction: str):
             extra_args={"temperature": 0.0, "max_tokens": 1000},
         )
 
-        crawl_config = CrawlerRunConfig(
-            extraction_strategy=llm_strategy,
-            cache_mode=CacheMode.BYPASS,
-            process_iframes=False,
-            remove_overlay_elements=True,
-            exclude_external_links=True,
-            wait_for_selectors=[click_selector] if click_selector else None
-        )
-
         browser_cfg = BrowserConfig(headless=True, verbose=False)
         all_results = []
         current_page = 1
 
         async with AsyncWebCrawler(config=browser_cfg) as crawler:
+            # Auto-detect selectors if enabled
+            if auto_detect:
+                await crawler.arun(url=url)  # Initial page load
+                next_page_selector, click_selector = await detect_selectors(crawler)
+                
+                if next_page_selector:
+                    st.info(f"📍 Detected pagination selector: {next_page_selector}")
+                if click_selector:
+                    st.info(f"🎯 Detected clickable elements selector: {click_selector}")
+                
+                if not next_page_selector and not click_selector:
+                    st.warning("⚠️ Could not detect selectors automatically. Consider manual configuration.")
+                    return {
+                        "success": False,
+                        "error_message": "No selectors detected"
+                    }
+
+            crawl_config = CrawlerRunConfig(
+                extraction_strategy=llm_strategy,
+                cache_mode=CacheMode.BYPASS,
+                process_iframes=False,
+                remove_overlay_elements=True,
+                exclude_external_links=True,
+                wait_for_selectors=[click_selector] if click_selector else None
+            )
+
             current_url = url
             
             while current_page <= max_pages:
@@ -213,13 +333,15 @@ with st.expander("ℹ️ How to use this tool"):
     **Follow these steps:**
     1. **Enter the URL** of the website you want to crawl.
     2. **Provide detailed instructions** for data extraction.
-    3. Configure **Advanced Settings** if needed:
+    3. Configure **Advanced Settings**:
+        - Enable/disable automatic selector detection
         - Set maximum pages to crawl
-        - Provide CSS selectors for pagination and clickable elements
         - Adjust wait time between actions
+        - Manually set selectors if auto-detection is disabled
     4. Click **'Start Crawling'** and wait for results.
     5. Download the extracted data as **JSON**.
 
-    🔹 *Ensure the website allows crawling by checking `robots.txt`.*  
-    ❗ *Crawling restricted or private websites may result in errors.*
+    🔹 *Auto-detection works best on structured websites with consistent layouts.*  
+    🔹 *If auto-detection fails, try manual selector configuration.*  
+    ❗ *Ensure the website allows crawling by checking `robots.txt`.*
     """)
