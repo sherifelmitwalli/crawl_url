@@ -3,6 +3,7 @@ Requirements:
 streamlit
 crawl4ai
 openai
+pydantic
 
 Deploy to Streamlit Community Cloud:
 1. Create a new app on https://share.streamlit.io/
@@ -19,13 +20,18 @@ from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
 from crawl4ai.extraction_strategy import LLMExtractionStrategy
 from pydantic import BaseModel
 
-# Set up OpenAI configuration using Streamlit secrets
+# Set page title and icon
+st.set_page_config(page_title="Web Crawler", page_icon="🕷️", layout="wide")
+
+st.title("🔍 Web Crawler with AI")
+
+# Check if API keys are set
 if "OPENAI_API_KEY" not in st.secrets or "MODEL" not in st.secrets:
-    st.error("Please set OPENAI_API_KEY and MODEL in the Streamlit secrets")
+    st.error("❌ Missing API credentials! Please set OPENAI_API_KEY and MODEL in the Streamlit secrets.")
     st.markdown("""
-        To set up secrets:
-        1. Go to your Streamlit dashboard
-        2. Navigate to your app's settings
+        **Steps to configure secrets:**
+        1. Go to your Streamlit dashboard.
+        2. Navigate to your app's settings.
         3. Add the following under 'Secrets':
             ```toml
             OPENAI_API_KEY = "your_api_key"
@@ -34,81 +40,98 @@ if "OPENAI_API_KEY" not in st.secrets or "MODEL" not in st.secrets:
     """)
     st.stop()
 
-model = st.secrets["MODEL"]
+# Load OpenAI model from secrets
+MODEL_NAME = st.secrets["MODEL"]
+OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
 
-st.set_page_config(page_title="Web Crawler", page_icon="🕷️", layout="wide")
-st.title("Web Crawler with AI")
-
-# Input fields
-url = st.text_input("Enter URL to crawl:", placeholder="https://example.com")
+# User input fields
+url = st.text_input("🌍 Enter URL to crawl:", placeholder="https://example.com")
 instruction = st.text_area(
-    "Enter instructions for crawling:",
-    placeholder="Example: Extract all product names and prices from the page"
+    "📝 Enter extraction instructions:",
+    placeholder="Example: Extract all product names and prices from the page."
 )
 
-# Create a generic schema for dynamic data extraction
+# Schema for extracted content
 class DynamicData(BaseModel):
     content: Dict[str, Any]
 
+# Async function to run the web crawler
 async def run_crawler(url: str, instruction: str):
-    llm_strategy = LLMExtractionStrategy(
-        provider=f"openai/{model}",
-        api_token=st.secrets["OPENAI_API_KEY"],
-        extraction_type="text",  # Using text mode for flexible extraction
-        instruction=instruction,
-        chunk_token_threshold=1000,
-        overlap_rate=0.0,
-        apply_chunking=True,
-        input_format="markdown",
-        extra_args={"temperature": 0.0, "max_tokens": 1000},
-    )
+    try:
+        llm_strategy = LLMExtractionStrategy(
+            provider=f"openai/{MODEL_NAME}",
+            api_token=OPENAI_API_KEY,
+            extraction_type="text",  # Using text mode for flexible extraction
+            instruction=instruction,
+            chunk_token_threshold=1000,
+            overlap_rate=0.0,
+            apply_chunking=True,
+            input_format="markdown",
+            extra_args={"temperature": 0.0, "max_tokens": 1000},
+        )
 
-    crawl_config = CrawlerRunConfig(
-        extraction_strategy=llm_strategy,
-        cache_mode=CacheMode.BYPASS,
-        process_iframes=False,
-        remove_overlay_elements=True,
-        exclude_external_links=True,
-    )
+        crawl_config = CrawlerRunConfig(
+            extraction_strategy=llm_strategy,
+            cache_mode=CacheMode.BYPASS,
+            process_iframes=False,
+            remove_overlay_elements=True,
+            exclude_external_links=True,
+        )
 
-    browser_cfg = BrowserConfig(headless=True, verbose=True)
+        browser_cfg = BrowserConfig(headless=True, verbose=False)
 
-    async with AsyncWebCrawler(config=browser_cfg) as crawler:
-        result = await crawler.arun(url=url, config=crawl_config)
-        return result
+        async with AsyncWebCrawler(config=browser_cfg) as crawler:
+            result = await crawler.arun(url=url, config=crawl_config)
+            return result
 
+    except Exception as e:
+        return f"❌ Error: {str(e)}"
+
+# Handle crawling execution
 if url and instruction:
-    if st.button("Start Crawling"):
-        with st.spinner("Crawling the website..."):
+    if st.button("🚀 Start Crawling"):
+        with st.spinner("⏳ Crawling the website... Please wait."):
             try:
-                result = asyncio.run(run_crawler(url, instruction))
-                
-                if result.success:
-                    st.success("Crawling completed successfully!")
-                    
-                    # Display the extracted data
+                # Streamlit doesn't support `asyncio.run()`, so we use `asyncio.new_event_loop()`
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                result = loop.run_until_complete(run_crawler(url, instruction))
+
+                if isinstance(result, str):  # Error case
+                    st.error(result)
+                elif result.success:
+                    st.success("✅ Crawling completed successfully!")
+
+                    # Display extracted data
                     data = json.loads(result.extracted_content)
                     st.json(data)
-                    
-                    # Create download button
+
+                    # Create a download button
                     st.download_button(
-                        label="Download Results",
+                        label="⬇️ Download Results",
                         data=result.extracted_content,
                         file_name="crawled_data.json",
                         mime="application/json"
                     )
                 else:
-                    st.error(f"Error during crawling: {result.error_message}")
-            except Exception as e:
-                st.error(f"An error occurred: {str(e)}")
+                    st.error(f"⚠️ Error during crawling: {result.error_message}")
 
-# Add usage instructions
-with st.expander("How to use"):
+            except ValueError as ve:
+                st.error(f"⚠️ Value error: {ve}")
+            except ConnectionError:
+                st.error("❌ Network issue. Please check your connection.")
+            except Exception as e:
+                st.error(f"❌ Unexpected error: {e}")
+
+# Add user instructions
+with st.expander("ℹ️ How to use this tool"):
     st.markdown("""
-    1. Enter the URL of the website you want to crawl
-    2. Provide specific instructions for what data to extract
-    3. Click 'Start Crawling' and wait for the results
-    4. Download the extracted data as JSON
-    
-    **Note**: Make sure the website allows crawling and respect their robots.txt
+    **Follow these steps:**
+    1. **Enter the URL** of the website you want to crawl.
+    2. **Provide detailed instructions** for data extraction.
+    3. Click **'Start Crawling'** and wait for results.
+    4. Download the extracted data as **JSON**.
+
+    🔹 *Ensure the website allows crawling by checking `robots.txt`.*  
+    ❗ *Crawling restricted or private websites may result in errors.*
     """)
