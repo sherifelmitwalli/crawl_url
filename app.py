@@ -50,7 +50,7 @@ class DynamicData(BaseModel):
 async def run_crawler(url: str, instruction: str):
     try:
         llm_strategy = LLMExtractionStrategy(
-            provider=f"openai/{MODEL_NAME}",
+            provider=f"openai/{MODEL}",
             api_token=OPENAI_API_KEY,
             extraction_type="text",  # Using text mode for flexible extraction
             instruction=instruction,
