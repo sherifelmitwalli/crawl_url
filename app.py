@@ -3,8 +3,6 @@ import asyncio
 import json
 import requests
 from typing import Dict, Any, List
-from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
-from crawl4ai.extraction_strategy import LLMExtractionStrategy
 from pydantic import BaseModel
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
@@ -117,114 +115,57 @@ def cancel_crawl():
 
 async def run_crawler(url: str, instruction: str, progress_callback):
     try:
-        # Initialize extraction strategy with specific focus on responses
-        llm_strategy = LLMExtractionStrategy(
-            provider=f"openai/{MODEL_NAME}",
-            api_token=OPENAI_API_KEY,
-            extraction_type="text",
-            instruction=f"""
-            {instruction}
-            Important: Extract each response or entry as a separate item.
-            Format the output as a JSON array where each item contains:
-            - The response content
-            - Any associated metadata (date, author, etc.)
-            - Any relevant details mentioned
-
-            Format as: {{"responses": [{{response details}}, ...]}}
-            """,
-            chunk_token_threshold=2000,
-            overlap_rate=0.1,
-            apply_chunking=True,
-            input_format="markdown",
-            extra_args={
-                "temperature": 0.0,
-                "max_tokens": 1500,
-                "response_format": {"type": "json_object"}
-            },
-        )
-
-        browser_cfg = BrowserConfig(
-            headless=True,
-            verbose=debug_mode
-        )
-
         all_results = []
         current_page = 1
         processed_urls = set()
 
-        semaphore = asyncio.Semaphore(concurrency_limit)
+        while current_page <= max_pages and url and not st.session_state.cancel:
+            if url in processed_urls:
+                if debug_mode:
+                    logger.info(f"Already processed URL: {url}")
+                break
 
-        async with AsyncWebCrawler(config=browser_cfg) as crawler:
-            current_url = url
+            if debug_mode:
+                logger.info(f"Processing page {current_page}: {url}")
 
-            while current_page <= max_pages and current_url and not st.session_state.cancel:
-                async with semaphore:
-                    if current_url in processed_urls:
-                        if debug_mode:
-                            logger.info(f"Already processed URL: {current_url}")
-                        break
+            processed_urls.add(url)
 
-                    if debug_mode:
-                        logger.info(f"Processing page {current_page}: {current_url}")
+            try:
+                response = requests.get(url, timeout=10)
+                if response.status_code != 200:
+                    logger.warning(f"Failed to retrieve {url} with status code {response.status_code}")
+                    return {"success": False, "error_message": f"Failed to retrieve {url}"}
+                content = response.text
+            except Exception as e:
+                logger.error(f"Error fetching {url}: {e}")
+                return {"success": False, "error_message": str(e)}
 
-                    processed_urls.add(current_url)
+            # Process content based on instruction (simplified)
+            # For example, extract all paragraphs
+            soup = BeautifulSoup(content, "html.parser")
+            paragraphs = [p.get_text() for p in soup.find_all('p')]
+            items = [{"content": p} for p in paragraphs]
+            all_results.extend(items)
 
-                    # Configure crawler for current page
-                    crawl_config = CrawlerRunConfig(
-                        extraction_strategy=llm_strategy,
-                        cache_mode=CacheMode.BYPASS,
-                        process_iframes=False,
-                        remove_overlay_elements=True,
-                        exclude_external_links=True,
-                    )
+            # Find next page link
+            next_url = None
+            for a in soup.find_all('a', href=True):
+                if 'next' in a.text.lower():
+                    next_url = urljoin(url, a['href'])
+                    break
 
-                    try:
-                        # Get page content
-                        result = await crawler.arun(url=current_url, config=crawl_config)
-                    except BrokenPipeError as bpe:
-                        logger.error(f"BrokenPipeError while processing {current_url}: {bpe}")
-                        return {"success": False, "error_message": f"BrokenPipeError: {str(bpe)}"}
-                    except Exception as e:
-                        logger.error(f"Unexpected error while processing {current_url}: {e}")
-                        return {"success": False, "error_message": str(e)}
+            if next_url and next_url != url:
+                url = next_url
+                current_page += 1
+                await asyncio.sleep(wait_time)
+            else:
+                if debug_mode:
+                    logger.info("No more pages found")
+                break
 
-                    if result.success:
-                        # Parse the extracted content
-                        page_results = parse_extracted_content(result.extracted_content)
-
-                        if debug_mode:
-                            logger.info(f"Extracted {len(page_results)} items from page {current_page}")
-
-                        all_results.extend(page_results)
-
-                        # Look for next page link in all available links
-                        next_url = None
-                        base_url = current_url
-
-                        # Get all links from the current page result
-                        for link in result.page_links:
-                            if link not in processed_urls and any(x in link.lower() for x in ['next', 'page', '?page=', 'paged']):
-                                next_url = urljoin(base_url, link)
-                                break
-
-                        if next_url and next_url != current_url:
-                            if debug_mode:
-                                logger.info(f"Found next page: {next_url}")
-                            current_url = next_url
-                            current_page += 1
-                            await asyncio.sleep(wait_time)
-                        else:
-                            if debug_mode:
-                                logger.info("No more pages found")
-                            break
-                    else:
-                        if debug_mode:
-                            logger.warning(f"Failed to process page {current_page}")
-                        break
-
-                # Update progress
-                progress = current_page / max_pages
-                progress_callback(progress)
+            # Update progress
+            progress = current_page / max_pages
+            progress_callback(progress)
 
         return {
             "success": True,
@@ -343,3 +284,4 @@ with st.expander("ℹ️ How to use this tool"):
     🔹 *Set retries and delay to handle transient network issues.*  
     ❗ *Ensure the website allows crawling by checking `robots.txt`.*
     """)
+
