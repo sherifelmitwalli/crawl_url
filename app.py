@@ -1,17 +1,3 @@
-"""
-Requirements:
-streamlit
-crawl4ai
-openai
-pydantic
-
-Deploy to Streamlit Community Cloud:
-1. Create a new app on https://share.streamlit.io/
-2. Add the following secrets in the Streamlit dashboard:
-   - OPENAI_API_KEY: your_api_key
-   - MODEL: gpt-4o-mini
-"""
-
 import streamlit as st
 import asyncio
 import json
@@ -19,6 +5,11 @@ from typing import Dict, Any
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
 from crawl4ai.extraction_strategy import LLMExtractionStrategy
 from pydantic import BaseModel
+import os
+
+# Install Playwright browsers
+os.system("playwright install")
+os.system("playwright install-deps")
 
 # Set page title and icon
 st.set_page_config(page_title="Web Crawler", page_icon="🕷️", layout="wide")
@@ -41,7 +32,7 @@ if "OPENAI_API_KEY" not in st.secrets or "MODEL" not in st.secrets:
     st.stop()
 
 # Load OpenAI model from secrets
-MODEL_NAME = st.secrets["MODEL"]
+MODEL = st.secrets["MODEL"]
 OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
 
 # User input fields
@@ -135,3 +126,4 @@ with st.expander("ℹ️ How to use this tool"):
     🔹 *Ensure the website allows crawling by checking `robots.txt`.*  
     ❗ *Crawling restricted or private websites may result in errors.*
     """)
+
