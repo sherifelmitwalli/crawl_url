@@ -5,7 +5,7 @@ from typing import Dict, Any, List, Tuple
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
 from crawl4ai.extraction_strategy import LLMExtractionStrategy
 from pydantic import BaseModel
-from playwright.async_api import Page
+from bs4 import BeautifulSoup
 
 # Set page title and icon
 st.set_page_config(page_title="Web Crawler", page_icon="🕷️", layout="wide")
@@ -15,16 +15,6 @@ st.title("🔍 Web Crawler with AI")
 # Check if API keys are set
 if "OPENAI_API_KEY" not in st.secrets or "MODEL" not in st.secrets:
     st.error("❌ Missing API credentials! Please set OPENAI_API_KEY and MODEL in the Streamlit secrets.")
-    st.markdown("""
-        **Steps to configure secrets:**
-        1. Go to your Streamlit dashboard.
-        2. Navigate to your app's settings.
-        3. Add the following under 'Secrets':
-            ```toml
-            OPENAI_API_KEY = "your_api_key"
-            MODEL = "gpt-4-mini"
-            ```
-    """)
     st.stop()
 
 # Load OpenAI model from secrets
@@ -42,8 +32,8 @@ instruction = st.text_area(
 with st.expander("Advanced Settings"):
     max_pages = st.number_input("Maximum pages to crawl", min_value=1, value=10)
     auto_detect = st.checkbox("Auto-detect selectors", value=True)
+    debug_mode = st.checkbox("Enable debug mode", value=False)
     
-    # Only show manual selector inputs if auto-detect is disabled
     if not auto_detect:
         next_page_selector = st.text_input(
             "CSS Selector for next page button",
@@ -55,143 +45,166 @@ with st.expander("Advanced Settings"):
         )
     wait_time = st.slider("Wait time between actions (seconds)", 1, 10, 3)
 
-class ExtractedData(BaseModel):
-    data: Dict[str, Any]
-    current_page: int
-    total_pages: int
-
-async def detect_selectors(result) -> Tuple[str, str]:
+async def analyze_page_structure(html_content: str) -> Tuple[str, str]:
     """
-    Detect pagination and clickable element selectors from the page content.
+    Analyze page structure to detect content and pagination patterns
     """
-    content = result.page_content
+    soup = BeautifulSoup(html_content, 'html.parser')
     
-    # Common patterns to look for in the HTML
+    # Common content patterns (elements that likely contain responses)
+    content_patterns = [
+        ('article', {}),
+        ('div', {'class': ['post', 'response', 'comment', 'item', 'entry']}),
+        ('div', {'class': lambda x: x and any(word in x.lower() for word in ['response', 'comment', 'post', 'content'])}),
+    ]
+    
+    # Common pagination patterns
     pagination_patterns = [
-        'a[rel="next"]',
-        '.pagination .next',
-        '.pagination-next',
-        '.next-page',
-        '[aria-label="Next page"]',
-        '.pagination li:last-child a',
-        '.page-next',
-        '[data-testid="pagination-next"]'
+        ('a', {'rel': 'next'}),
+        ('a', {'class': lambda x: x and 'next' in x.lower()}),
+        ('link', {'rel': 'next'}),
+        ('button', {'class': lambda x: x and 'next' in x.lower()}),
     ]
     
-    clickable_patterns = [
-        '.item-card',
-        '.response-item',
-        '.content-card',
-        '.result-item',
-        '.list-item',
-        'article',
-        '.post',
-        '.entry'
-    ]
+    # Find content elements
+    content_selector = None
+    max_elements = 0
     
-    # Look for pagination selector
-    next_page_selector = None
-    for pattern in pagination_patterns:
-        if pattern.lower() in content.lower():
-            next_page_selector = pattern
+    for tag, attrs in content_patterns:
+        elements = soup.find_all(tag, attrs)
+        if len(elements) > max_elements:
+            # Get the CSS selector for this element type
+            if elements and elements[0].get('class'):
+                content_selector = f"{tag}.{'.'.join(elements[0]['class'])}"
+                max_elements = len(elements)
+    
+    # Find pagination element
+    next_page = None
+    for tag, attrs in pagination_patterns:
+        element = soup.find(tag, attrs)
+        if element:
+            if element.get('class'):
+                next_page = f"{tag}.{'.'.join(element['class'])}"
+            else:
+                next_page = tag
             break
     
-    # Look for clickable elements selector
-    click_selector = None
-    for pattern in clickable_patterns:
-        if pattern.lower() in content.lower():
-            click_selector = pattern
-            break
-            
-    return next_page_selector, click_selector
+    if debug_mode:
+        st.write(f"Found {max_elements} potential content elements")
+        st.write(f"Content selector: {content_selector}")
+        st.write(f"Next page selector: {next_page}")
+    
+    return next_page, content_selector
 
 async def run_crawler(url: str, instruction: str):
     try:
+        # Initialize extraction strategy with specific focus on responses
         llm_strategy = LLMExtractionStrategy(
             provider=f"openai/{MODEL_NAME}",
             api_token=OPENAI_API_KEY,
             extraction_type="text",
-            instruction=instruction,
-            chunk_token_threshold=1000,
-            overlap_rate=0.0,
+            instruction=f"""
+            {instruction}
+            Focus on extracting individual responses or entries. 
+            For each response, create a separate entry in the results.
+            Include all relevant details mentioned in the text.
+            """,
+            chunk_token_threshold=2000,  # Increased to handle larger content blocks
+            overlap_rate=0.1,
             apply_chunking=True,
             input_format="markdown",
-            extra_args={"temperature": 0.0, "max_tokens": 1000},
+            extra_args={
+                "temperature": 0.0,
+                "max_tokens": 1500,
+                "response_format": {"type": "json_object"}
+            },
         )
 
-        browser_cfg = BrowserConfig(headless=True, verbose=False)
+        browser_cfg = BrowserConfig(
+            headless=True,
+            verbose=debug_mode
+        )
+        
         all_results = []
         current_page = 1
-
+        
         async with AsyncWebCrawler(config=browser_cfg) as crawler:
-            # Initial configuration
             current_url = url
-            page_selectors = None
-            content_selector = None
             
-            # Auto-detect selectors if enabled
-            if auto_detect:
-                initial_result = await crawler.arun(url=url)
-                if initial_result.success:
-                    page_selectors, content_selector = await detect_selectors(initial_result)
-                    
-                    if page_selectors:
-                        st.info(f"📍 Detected pagination selector: {page_selectors}")
-                    if content_selector:
-                        st.info(f"🎯 Detected clickable elements selector: {content_selector}")
-                    
-                    if not page_selectors and not content_selector:
-                        st.warning("⚠️ Could not detect selectors automatically. Using default extraction.")
-            else:
-                page_selectors = next_page_selector if 'next_page_selector' in locals() else None
-                content_selector = click_selector if 'click_selector' in locals() else None
-
-            crawl_config = CrawlerRunConfig(
-                extraction_strategy=llm_strategy,
-                cache_mode=CacheMode.BYPASS,
-                process_iframes=False,
-                remove_overlay_elements=True,
-                exclude_external_links=True,
-            )
-
             while current_page <= max_pages:
-                # Extract content from current page
+                if debug_mode:
+                    st.write(f"Crawling page {current_page}: {current_url}")
+                
+                # Configure crawler for current page
+                crawl_config = CrawlerRunConfig(
+                    extraction_strategy=llm_strategy,
+                    cache_mode=CacheMode.BYPASS,
+                    process_iframes=False,
+                    remove_overlay_elements=True,
+                    exclude_external_links=True,
+                )
+                
+                # Get page content
                 result = await crawler.arun(url=current_url, config=crawl_config)
                 
                 if result.success:
-                    all_results.append(result.extracted_content)
+                    # Parse the extracted content
+                    try:
+                        extracted_data = json.loads(result.extracted_content)
+                        if debug_mode:
+                            st.write(f"Extracted data from page {current_page}:", extracted_data)
+                        
+                        # Handle different possible JSON structures
+                        if isinstance(extracted_data, dict):
+                            if 'responses' in extracted_data:
+                                all_results.extend(extracted_data['responses'])
+                            elif 'items' in extracted_data:
+                                all_results.extend(extracted_data['items'])
+                            else:
+                                all_results.append(extracted_data)
+                        elif isinstance(extracted_data, list):
+                            all_results.extend(extracted_data)
+                    except json.JSONDecodeError:
+                        if debug_mode:
+                            st.write("Failed to parse JSON, storing raw content")
+                        all_results.append({"content": result.extracted_content})
                     
-                    # Try to find next page link
-                    if page_selectors and current_page < max_pages:
-                        # Extract links from the page
-                        links = result.page_links
-                        next_page_url = None
-                        
-                        # Look for next page link
-                        for link in links:
-                            if any(word in link.lower() for word in ['next', 'page', 'forward']):
-                                next_page_url = link
-                                break
-                        
-                        if next_page_url:
-                            current_url = next_page_url
-                            current_page += 1
-                            await asyncio.sleep(wait_time)
-                        else:
-                            break
+                    # Analyze page structure for navigation
+                    next_page_link = None
+                    if result.page_content:
+                        next_selector, _ = await analyze_page_structure(result.page_content)
+                        if next_selector:
+                            for link in result.page_links:
+                                if 'next' in link.lower() or 'page' in link.lower():
+                                    next_page_link = link
+                                    break
+                    
+                    if next_page_link:
+                        current_url = next_page_link
+                        current_page += 1
+                        await asyncio.sleep(wait_time)
+                        if debug_mode:
+                            st.write(f"Moving to next page: {current_url}")
                     else:
+                        if debug_mode:
+                            st.write("No more pages found")
                         break
                 else:
+                    if debug_mode:
+                        st.write(f"Failed to process page {current_page}")
                     break
 
             return {
                 "success": True,
-                "extracted_content": json.dumps(all_results),
+                "extracted_content": json.dumps(all_results, indent=2),
                 "current_page": current_page,
-                "total_pages": max_pages
+                "total_pages": max_pages,
+                "total_items": len(all_results)
             }
 
     except Exception as e:
+        if debug_mode:
+            st.exception(e)
         return f"❌ Error: {str(e)}"
 
 # Handle crawling execution
@@ -209,7 +222,15 @@ if url and instruction:
                     st.success("✅ Crawling completed successfully!")
                     
                     # Display crawling statistics
-                    st.info(f"📊 Crawled {result['current_page']} pages out of maximum {result['total_pages']} pages")
+                    st.info(f"""
+                    📊 Crawl Statistics:
+                    - Pages crawled: {result['current_page']} of {result['total_pages']}
+                    - Total items extracted: {result['total_items']}
+                    """)
+
+                    # Preview the data
+                    with st.expander("👀 Preview Extracted Data"):
+                        st.json(json.loads(result['extracted_content']))
 
                     # Create a download button for the extracted data
                     st.download_button(
@@ -221,10 +242,6 @@ if url and instruction:
                 else:
                     st.error(f"⚠️ Error during crawling: {result.get('error_message', 'Unknown error')}")
 
-            except ValueError as ve:
-                st.error(f"⚠️ Value error: {ve}")
-            except ConnectionError:
-                st.error("❌ Network issue. Please check your connection.")
             except Exception as e:
                 st.error(f"❌ Unexpected error: {e}")
 
@@ -238,11 +255,11 @@ with st.expander("ℹ️ How to use this tool"):
         - Enable/disable automatic selector detection
         - Set maximum pages to crawl
         - Adjust wait time between actions
-        - Manually set selectors if auto-detection is disabled
+        - Enable debug mode for detailed logging
     4. Click **'Start Crawling'** and wait for results.
-    5. Download the extracted data as **JSON**.
+    5. Preview and download the extracted data as JSON.
 
-    🔹 *Auto-detection works best on structured websites with consistent layouts.*  
-    🔹 *If auto-detection fails, try manual selector configuration.*  
+    🔹 *Enable debug mode to see detailed extraction process.*  
+    🔹 *Adjust wait time if the site takes longer to load.*  
     ❗ *Ensure the website allows crawling by checking `robots.txt`.*
     """)
