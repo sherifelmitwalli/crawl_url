@@ -220,3 +220,4 @@ with st.expander("ℹ️ How to use this tool"):
     🔹 *Ensure the website allows crawling by checking `robots.txt`*  
     ❗ *Crawling restricted or private websites may result in errors*
     """)
+
