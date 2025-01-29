@@ -1,3 +1,4 @@
 streamlit
 crawl4ai
-openai==1.6.1
+openai
+pydantic
