@@ -3,7 +3,7 @@ import asyncio
 import json
 from typing import List, Dict, Any
 from pydantic import BaseModel
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, expect
 
 # Set page title and icon
 st.set_page_config(page_title="Web Crawler", page_icon="🕷️", layout="wide")
@@ -31,11 +31,12 @@ async def run_crawler(url: str, instruction: str) -> List[Dict[str, Any]]:
             page = await browser.new_page()
             await page.goto(url)
 
-            # Wait for the responses list to load
-            await page.wait_for_selector("div.govuk-grid-column-two-thirds")
+            # Wait for the responses list to load with an increased timeout
+            response_list_locator = page.locator("div.govuk-grid-column-two-thirds")
+            await expect(response_list_locator).to_be_visible(timeout=60000)  # Waits up to 60 seconds
 
             # Extract links to individual responses
-            response_links = await page.query_selector_all("div.govuk-grid-column-two-thirds a")
+            response_links = await response_list_locator.locator("a").all()
 
             for link in response_links:
                 response_url = await link.get_attribute("href")
@@ -46,7 +47,9 @@ async def run_crawler(url: str, instruction: str) -> List[Dict[str, Any]]:
                 await response_page.goto(response_url)
 
                 # Extract the response text
-                response_text = await response_page.inner_text("div.govuk-grid-column-two-thirds")
+                response_text_locator = response_page.locator("div.govuk-grid-column-two-thirds")
+                await expect(response_text_locator).to_be_visible(timeout=60000)  # Waits up to 60 seconds
+                response_text = await response_text_locator.inner_text()
 
                 # Append the data to the list
                 responses.append(ResponseData(
