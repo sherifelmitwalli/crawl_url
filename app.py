@@ -199,7 +199,7 @@ async def click_and_extract(crawler: AsyncWebCrawler, url: str, config: CrawlerR
 async def run_crawler(url: str, instruction: str):
     try:
         llm_strategy = LLMExtractionStrategy(
-            provider=f"openai/{MODEL}",
+            provider=f"openai/{MODEL_NAME}",
             api_token=OPENAI_API_KEY,
             extraction_type="text",
             instruction=instruction,
