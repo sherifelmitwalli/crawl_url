@@ -27,7 +27,7 @@ if "OPENAI_API_KEY" not in st.secrets or "MODEL" not in st.secrets:
     st.stop()
 
 # Load OpenAI model from secrets
-MODEL_NAME = st.secrets["MODEL"]
+MODEL = st.secrets["MODEL"]
 OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
 
 # User input fields
@@ -55,30 +55,48 @@ class ExtractedData(BaseModel):
     current_page: int
     total_pages: int
 
-async def click_and_extract(page, selector: str, instruction: str, llm_strategy: LLMExtractionStrategy):
-    elements = await page.query_selector_all(selector)
+async def click_and_extract(crawler: AsyncWebCrawler, url: str, config: CrawlerRunConfig, selector: str):
     results = []
     
-    for element in elements:
-        # Click the element
-        await element.click()
-        await asyncio.sleep(wait_time)  # Wait for content to load
+    # Get the page content and find clickable elements
+    initial_result = await crawler.arun(url=url, config=config)
+    if not initial_result.success:
+        return []
+    
+    # Use JavaScript to get all matching elements
+    elements = await crawler.browser_context.evaluate(f'''
+        () => {{
+            const elements = document.querySelectorAll("{selector}");
+            return Array.from(elements).map(el => {{
+                const rect = el.getBoundingClientRect();
+                return {{
+                    x: rect.x + rect.width / 2,
+                    y: rect.y + rect.height / 2
+                }};
+            }});
+        }}
+    ''')
+    
+    for element_pos in elements:
+        # Click the element using mouse position
+        await crawler.browser_context.mouse.click(element_pos['x'], element_pos['y'])
+        await asyncio.sleep(wait_time)
         
         # Extract content after clicking
-        content = await page.content()
-        extracted = await llm_strategy.process(content)
-        results.append(extracted)
+        result = await crawler.arun(url=crawler.browser_context.url, config=config)
+        if result.success:
+            results.append(result.extracted_content)
         
-        # Go back or handle the state after clicking
-        await page.go_back()
-        await asyncio.sleep(wait_time)  # Wait for page to reload
+        # Go back
+        await crawler.browser_context.go_back()
+        await asyncio.sleep(wait_time)
     
     return results
 
 async def run_crawler(url: str, instruction: str):
     try:
         llm_strategy = LLMExtractionStrategy(
-            provider=f"openai/{MODEL_NAME}",
+            provider=f"openai/{MODEL}",
             api_token=OPENAI_API_KEY,
             extraction_type="text",
             instruction=instruction,
@@ -95,6 +113,7 @@ async def run_crawler(url: str, instruction: str):
             process_iframes=False,
             remove_overlay_elements=True,
             exclude_external_links=True,
+            wait_for_selectors=[click_selector] if click_selector else None
         )
 
         browser_cfg = BrowserConfig(headless=True, verbose=False)
@@ -102,31 +121,44 @@ async def run_crawler(url: str, instruction: str):
         current_page = 1
 
         async with AsyncWebCrawler(config=browser_cfg) as crawler:
-            page = await crawler.launch_browser()
-            await page.goto(url)
+            current_url = url
             
             while current_page <= max_pages:
                 # Extract data from current page
                 if click_selector:
                     page_results = await click_and_extract(
-                        page, 
-                        click_selector, 
-                        instruction, 
-                        llm_strategy
+                        crawler,
+                        current_url,
+                        crawl_config,
+                        click_selector
                     )
                     all_results.extend(page_results)
                 else:
-                    result = await crawler.arun(url=url, config=crawl_config)
-                    all_results.append(result.extracted_content)
+                    result = await crawler.arun(url=current_url, config=crawl_config)
+                    if result.success:
+                        all_results.append(result.extracted_content)
+                    else:
+                        break
 
                 # Check for next page
                 if next_page_selector:
-                    next_button = await page.query_selector(next_page_selector)
-                    if not next_button:
+                    # Try to find and click next page button
+                    next_button_exists = await crawler.browser_context.evaluate(f'''
+                        () => {{
+                            const nextButton = document.querySelector("{next_page_selector}");
+                            if (nextButton) {{
+                                nextButton.click();
+                                return true;
+                            }}
+                            return false;
+                        }}
+                    ''')
+                    
+                    if not next_button_exists:
                         break
                     
-                    await next_button.click()
-                    await asyncio.sleep(wait_time)  # Wait for next page to load
+                    await asyncio.sleep(wait_time)
+                    current_url = crawler.browser_context.url
                     current_page += 1
                 else:
                     break
