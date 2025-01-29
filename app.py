@@ -5,6 +5,7 @@ from typing import Dict, Any, List, Tuple
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
 from crawl4ai.extraction_strategy import LLMExtractionStrategy
 from pydantic import BaseModel
+from playwright.async_api import Page
 
 # Set page title and icon
 st.set_page_config(page_title="Web Crawler", page_icon="🕷️", layout="wide")
@@ -59,142 +60,50 @@ class ExtractedData(BaseModel):
     current_page: int
     total_pages: int
 
-async def detect_selectors(crawler: AsyncWebCrawler) -> Tuple[str, str]:
+async def detect_selectors(result) -> Tuple[str, str]:
     """
-    Automatically detect pagination and clickable element selectors.
-    Returns tuple of (next_page_selector, clickable_elements_selector)
+    Detect pagination and clickable element selectors from the page content.
     """
-    # Common patterns for pagination and clickable elements
+    content = result.page_content
+    
+    # Common patterns to look for in the HTML
     pagination_patterns = [
-        # Common next page button patterns
-        """
-        () => {
-            const patterns = [
-                'a[rel="next"]',
-                '.pagination .next',
-                '.pagination-next',
-                'a:contains("Next")',
-                'button:contains("Next")',
-                '.next-page',
-                '[aria-label="Next page"]',
-                '.pagination li:last-child a',
-                '.page-next',
-                '[data-testid="pagination-next"]'
-            ];
-            
-            for (let pattern of patterns) {
-                const element = document.querySelector(pattern);
-                if (element) return pattern;
-            }
-            
-            // Look for links/buttons containing "next" or "→"
-            const elements = Array.from(document.querySelectorAll('a, button'));
-            for (let el of elements) {
-                if (el.textContent.toLowerCase().includes('next') || 
-                    el.textContent.includes('→') ||
-                    el.getAttribute('aria-label')?.toLowerCase().includes('next')) {
-                    return el.tagName.toLowerCase() + 
-                           (el.className ? '.' + el.className.split(' ').join('.') : '');
-                }
-            }
-            
-            return null;
-        }
-        """
+        'a[rel="next"]',
+        '.pagination .next',
+        '.pagination-next',
+        '.next-page',
+        '[aria-label="Next page"]',
+        '.pagination li:last-child a',
+        '.page-next',
+        '[data-testid="pagination-next"]'
     ]
-
+    
     clickable_patterns = [
-        # Common clickable element patterns
-        """
-        () => {
-            // Look for repeated structural patterns
-            const patterns = new Map();
-            
-            // Find elements that appear multiple times with similar structure
-            const elements = document.querySelectorAll('*');
-            for (let el of elements) {
-                if (!el.className) continue;
-                
-                const siblings = document.querySelectorAll('.' + el.className.split(' ').join('.'));
-                if (siblings.length > 1) {
-                    // Check if elements contain interactive content
-                    const hasContent = Array.from(siblings).some(sib => {
-                        const text = sib.textContent.trim();
-                        const hasLinks = sib.querySelector('a');
-                        const isClickable = window.getComputedStyle(sib).cursor === 'pointer';
-                        return text.length > 20 && (hasLinks || isClickable);
-                    });
-                    
-                    if (hasContent) {
-                        patterns.set('.' + el.className.split(' ').join('.'), siblings.length);
-                    }
-                }
-            }
-            
-            // Return the selector with the most matches
-            return Array.from(patterns.entries())
-                .sort((a, b) => b[1] - a[1])
-                [0]?.[0] || null;
-        }
-        """
+        '.item-card',
+        '.response-item',
+        '.content-card',
+        '.result-item',
+        '.list-item',
+        'article',
+        '.post',
+        '.entry'
     ]
-
+    
+    # Look for pagination selector
     next_page_selector = None
-    clickable_selector = None
-
-    # Try each pagination pattern
     for pattern in pagination_patterns:
-        result = await crawler.browser_context.evaluate(pattern)
-        if result:
-            next_page_selector = result
+        if pattern.lower() in content.lower():
+            next_page_selector = pattern
             break
-
-    # Try each clickable pattern
+    
+    # Look for clickable elements selector
+    click_selector = None
     for pattern in clickable_patterns:
-        result = await crawler.browser_context.evaluate(pattern)
-        if result:
-            clickable_selector = result
+        if pattern.lower() in content.lower():
+            click_selector = pattern
             break
-
-    return next_page_selector, clickable_selector
-
-async def click_and_extract(crawler: AsyncWebCrawler, url: str, config: CrawlerRunConfig, selector: str):
-    results = []
-    
-    # Get the page content and find clickable elements
-    initial_result = await crawler.arun(url=url, config=config)
-    if not initial_result.success:
-        return []
-    
-    # Use JavaScript to get all matching elements
-    elements = await crawler.browser_context.evaluate(f'''
-        () => {{
-            const elements = document.querySelectorAll("{selector}");
-            return Array.from(elements).map(el => {{
-                const rect = el.getBoundingClientRect();
-                return {{
-                    x: rect.x + rect.width / 2,
-                    y: rect.y + rect.height / 2
-                }};
-            }});
-        }}
-    ''')
-    
-    for element_pos in elements:
-        # Click the element using mouse position
-        await crawler.browser_context.mouse.click(element_pos['x'], element_pos['y'])
-        await asyncio.sleep(wait_time)
-        
-        # Extract content after clicking
-        result = await crawler.arun(url=crawler.browser_context.url, config=config)
-        if result.success:
-            results.append(result.extracted_content)
-        
-        # Go back
-        await crawler.browser_context.go_back()
-        await asyncio.sleep(wait_time)
-    
-    return results
+            
+    return next_page_selector, click_selector
 
 async def run_crawler(url: str, instruction: str):
     try:
@@ -215,22 +124,27 @@ async def run_crawler(url: str, instruction: str):
         current_page = 1
 
         async with AsyncWebCrawler(config=browser_cfg) as crawler:
+            # Initial configuration
+            current_url = url
+            page_selectors = None
+            content_selector = None
+            
             # Auto-detect selectors if enabled
             if auto_detect:
-                await crawler.arun(url=url)  # Initial page load
-                next_page_selector, click_selector = await detect_selectors(crawler)
-                
-                if next_page_selector:
-                    st.info(f"📍 Detected pagination selector: {next_page_selector}")
-                if click_selector:
-                    st.info(f"🎯 Detected clickable elements selector: {click_selector}")
-                
-                if not next_page_selector and not click_selector:
-                    st.warning("⚠️ Could not detect selectors automatically. Consider manual configuration.")
-                    return {
-                        "success": False,
-                        "error_message": "No selectors detected"
-                    }
+                initial_result = await crawler.arun(url=url)
+                if initial_result.success:
+                    page_selectors, content_selector = await detect_selectors(initial_result)
+                    
+                    if page_selectors:
+                        st.info(f"📍 Detected pagination selector: {page_selectors}")
+                    if content_selector:
+                        st.info(f"🎯 Detected clickable elements selector: {content_selector}")
+                    
+                    if not page_selectors and not content_selector:
+                        st.warning("⚠️ Could not detect selectors automatically. Using default extraction.")
+            else:
+                page_selectors = next_page_selector if 'next_page_selector' in locals() else None
+                content_selector = click_selector if 'click_selector' in locals() else None
 
             crawl_config = CrawlerRunConfig(
                 extraction_strategy=llm_strategy,
@@ -238,48 +152,35 @@ async def run_crawler(url: str, instruction: str):
                 process_iframes=False,
                 remove_overlay_elements=True,
                 exclude_external_links=True,
-                wait_for_selectors=[click_selector] if click_selector else None
             )
 
-            current_url = url
-            
             while current_page <= max_pages:
-                # Extract data from current page
-                if click_selector:
-                    page_results = await click_and_extract(
-                        crawler,
-                        current_url,
-                        crawl_config,
-                        click_selector
-                    )
-                    all_results.extend(page_results)
-                else:
-                    result = await crawler.arun(url=current_url, config=crawl_config)
-                    if result.success:
-                        all_results.append(result.extracted_content)
+                # Extract content from current page
+                result = await crawler.arun(url=current_url, config=crawl_config)
+                
+                if result.success:
+                    all_results.append(result.extracted_content)
+                    
+                    # Try to find next page link
+                    if page_selectors and current_page < max_pages:
+                        # Extract links from the page
+                        links = result.page_links
+                        next_page_url = None
+                        
+                        # Look for next page link
+                        for link in links:
+                            if any(word in link.lower() for word in ['next', 'page', 'forward']):
+                                next_page_url = link
+                                break
+                        
+                        if next_page_url:
+                            current_url = next_page_url
+                            current_page += 1
+                            await asyncio.sleep(wait_time)
+                        else:
+                            break
                     else:
                         break
-
-                # Check for next page
-                if next_page_selector:
-                    # Try to find and click next page button
-                    next_button_exists = await crawler.browser_context.evaluate(f'''
-                        () => {{
-                            const nextButton = document.querySelector("{next_page_selector}");
-                            if (nextButton) {{
-                                nextButton.click();
-                                return true;
-                            }}
-                            return false;
-                        }}
-                    ''')
-                    
-                    if not next_button_exists:
-                        break
-                    
-                    await asyncio.sleep(wait_time)
-                    current_url = crawler.browser_context.url
-                    current_page += 1
                 else:
                     break
 
