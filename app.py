@@ -48,7 +48,6 @@ async def _scrape_data(url: str, instruction: str, num_pages: int, all_pages: bo
         process_iframes=False,
         remove_overlay_elements=True,
         exclude_external_links=True,
-        click_elements=True,
         levels=levels,
     )
 
@@ -105,5 +104,3 @@ if st.button("Start Scraping"):
                 st.error(f"An error occurred: {str(e)}")
     else:
         st.write("Please enter the URL, instructions, number of pages, and levels.")
-
-
