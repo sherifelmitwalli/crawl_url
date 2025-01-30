@@ -8,7 +8,7 @@ import nest_asyncio
 
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
 from crawl4ai.extraction_strategy import LLMExtractionStrategy
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 # Apply nest_asyncio to handle async operations in Streamlit
 nest_asyncio.apply()
@@ -17,15 +17,18 @@ class Product(BaseModel):
     name: str
     price: str
 
-def run_async_scraper(url, instruction, num_pages, all_pages, levels):
+def run_async_scraper(url: str, instruction: str, num_pages: int, all_pages: bool, levels: int):
+    """Run the asynchronous web scraper synchronously in Streamlit."""
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         return loop.run_until_complete(_scrape_data(url, instruction, num_pages, all_pages, levels))
     except Exception as e:
         st.error(f"Error during scraping: {str(e)}")
         return []
 
-async def _scrape_data(url, instruction, num_pages, all_pages, levels):
+async def _scrape_data(url: str, instruction: str, num_pages: int, all_pages: bool, levels: int):
+    """Perform asynchronous scraping."""
     llm_strategy = LLMExtractionStrategy(
         provider=st.secrets["MODEL"],
         api_token=st.secrets["OPENAI_API_KEY"],
@@ -46,7 +49,7 @@ async def _scrape_data(url, instruction, num_pages, all_pages, levels):
         remove_overlay_elements=True,
         exclude_external_links=True,
         click_elements=True,
-        levels=levels
+        levels=levels,
     )
 
     browser_cfg = BrowserConfig(headless=True, verbose=True)
@@ -59,8 +62,13 @@ async def _scrape_data(url, instruction, num_pages, all_pages, levels):
                 page_url = f"{url}?page={page}"
                 result = await crawler.arun(url=page_url, config=crawl_config)
                 if result.success:
-                    data = json.loads(result.extracted_content)
-                    all_data.extend(data)
+                    try:
+                        data = json.loads(result.extracted_content)
+                        all_data.extend(data)
+                    except json.JSONDecodeError:
+                        st.error(f"Failed to decode JSON on page {page}")
+                        break
+                    
                     if not all_pages or page >= num_pages:
                         break
                     page += 1
@@ -97,4 +105,5 @@ if st.button("Start Scraping"):
                 st.error(f"An error occurred: {str(e)}")
     else:
         st.write("Please enter the URL, instructions, number of pages, and levels.")
+
 
