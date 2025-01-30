@@ -1,4 +1,6 @@
 streamlit
 openai
-crawl4ai
+asyncio
 pydantic
+crawl4ai
+nest-asyncio
