@@ -78,4 +78,3 @@ if st.button("Start Scraping"):
     else:
         st.write("Please enter the URL, instructions, number of pages, and levels.")
 
-
