@@ -73,9 +73,10 @@ async def _scrape_data(url: str, instruction: str, num_pages: int, all_pages: bo
                         st.error(f"Failed to decode JSON on page {page}")
                         break
                     
-                    if not all_pages or page >= num_pages:
+                    if all_pages or page < num_pages:
+                        page += 1
+                    else:
                         break
-                    page += 1
                 else:
                     st.write(f"Error on page {page}: {result.error_message}")
                     break
@@ -102,7 +103,7 @@ if st.button("Start Scraping"):
             try:
                 data = run_async_scraper(url_to_scrape, instruction_to_llm, num_pages, all_pages)
                 if data:
-                    formatted_data = "\n\n".join([f"Extracted Text: {item['text']}" for item in data])
+                    formatted_data = "\n".join([item['text'] for item in data])
                     st.download_button("Download Data", formatted_data, "scraped_data.txt")
             except Exception as e:
                 st.error(f"An error occurred: {str(e)}")
