@@ -78,3 +78,23 @@ openai.api_key = st.secrets["OPENAI_API_KEY"]
 # Streamlit app
 st.title("AI Assisted Crawling")
 
+# User input
+url_to_scrape = st.text_input("Enter the URL to scrape:")
+instruction_to_llm = st.text_area("Enter the instructions for what to scrape:")
+num_pages = st.number_input("Enter the number of pages to scrape:", min_value=1, step=1)
+all_pages = st.checkbox("Scrape all pages")
+levels = st.number_input("Enter the number of levels to scrape:", min_value=1, step=1)
+
+if st.button("Start Scraping"):
+    if url_to_scrape and instruction_to_llm:
+        with st.spinner("Scraping in progress..."):
+            try:
+                data = run_async_scraper(url_to_scrape, instruction_to_llm, num_pages, all_pages, levels)
+                if data:
+                    formatted_data = "\n\n".join([f"Name: {item['name']}\nPrice: {item['price']}" for item in data])
+                    st.download_button("Download Data", formatted_data, "scraped_data.txt")
+            except Exception as e:
+                st.error(f"An error occurred: {str(e)}")
+    else:
+        st.write("Please enter the URL, instructions, number of pages, and levels.")
+
