@@ -13,9 +13,8 @@ from pydantic import BaseModel
 # Apply nest_asyncio to handle async operations in Streamlit
 nest_asyncio.apply()
 
-class Product(BaseModel):
-    name: str
-    price: str
+class ExtractedText(BaseModel):
+    text: str
 
 def run_async_scraper(url: str, instruction: str, num_pages: int, all_pages: bool):
     """Run the asynchronous web scraper synchronously in Streamlit."""
@@ -32,7 +31,7 @@ async def _scrape_data(url: str, instruction: str, num_pages: int, all_pages: bo
     llm_strategy = LLMExtractionStrategy(
         provider=st.secrets["MODEL"],
         api_token=st.secrets["OPENAI_API_KEY"],
-        schema=Product.model_json_schema(),
+        schema=ExtractedText.model_json_schema(),
         extraction_type="schema",
         instruction=instruction,
         chunk_token_threshold=1000,
@@ -96,10 +95,11 @@ if st.button("Start Scraping"):
             try:
                 data = run_async_scraper(url_to_scrape, instruction_to_llm, num_pages, all_pages)
                 if data:
-                    formatted_data = "\n\n".join([f"Name: {item['name']}\nPrice: {item['price']}" for item in data])
+                    formatted_data = "\n\n".join([f"Extracted Text: {item['text']}" for item in data])
                     st.download_button("Download Data", formatted_data, "scraped_data.txt")
             except Exception as e:
                 st.error(f"An error occurred: {str(e)}")
     else:
         st.write("Please enter the URL, instructions, and number of pages.")
+
 
