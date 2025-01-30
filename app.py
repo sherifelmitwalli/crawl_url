@@ -17,17 +17,17 @@ class Product(BaseModel):
     name: str
     price: str
 
-def run_async_scraper(url: str, instruction: str, num_pages: int, all_pages: bool, levels: int):
+def run_async_scraper(url: str, instruction: str, num_pages: int, all_pages: bool):
     """Run the asynchronous web scraper synchronously in Streamlit."""
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        return loop.run_until_complete(_scrape_data(url, instruction, num_pages, all_pages, levels))
+        return loop.run_until_complete(_scrape_data(url, instruction, num_pages, all_pages))
     except Exception as e:
         st.error(f"Error during scraping: {str(e)}")
         return []
 
-async def _scrape_data(url: str, instruction: str, num_pages: int, all_pages: bool, levels: int):
+async def _scrape_data(url: str, instruction: str, num_pages: int, all_pages: bool):
     """Perform asynchronous scraping."""
     llm_strategy = LLMExtractionStrategy(
         provider=st.secrets["MODEL"],
@@ -48,7 +48,6 @@ async def _scrape_data(url: str, instruction: str, num_pages: int, all_pages: bo
         process_iframes=False,
         remove_overlay_elements=True,
         exclude_external_links=True,
-        levels=levels,
     )
 
     browser_cfg = BrowserConfig(headless=True, verbose=True)
@@ -90,17 +89,17 @@ url_to_scrape = st.text_input("Enter the URL to scrape:")
 instruction_to_llm = st.text_area("Enter the instructions for what to scrape:")
 num_pages = st.number_input("Enter the number of pages to scrape:", min_value=1, step=1)
 all_pages = st.checkbox("Scrape all pages")
-levels = st.number_input("Enter the number of levels to scrape:", min_value=1, step=1)
 
 if st.button("Start Scraping"):
     if url_to_scrape and instruction_to_llm:
         with st.spinner("Scraping in progress..."):
             try:
-                data = run_async_scraper(url_to_scrape, instruction_to_llm, num_pages, all_pages, levels)
+                data = run_async_scraper(url_to_scrape, instruction_to_llm, num_pages, all_pages)
                 if data:
                     formatted_data = "\n\n".join([f"Name: {item['name']}\nPrice: {item['price']}" for item in data])
                     st.download_button("Download Data", formatted_data, "scraped_data.txt")
             except Exception as e:
                 st.error(f"An error occurred: {str(e)}")
     else:
-        st.write("Please enter the URL, instructions, number of pages, and levels.")
+        st.write("Please enter the URL, instructions, and number of pages.")
+
