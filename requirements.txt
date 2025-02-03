@@ -9,3 +9,4 @@ nest-asyncio>=1.5.0
 # Web scraping & AI
 playwright>=1.30.0
 openai>=0.28.0
+git+https://github.com/ai-made-approachable/crawl4ai.git
