@@ -3,6 +3,7 @@ import openai
 import asyncio
 import json
 import os
+import pandas as pd
 from typing import List
 import nest_asyncio
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
@@ -11,6 +12,15 @@ from pydantic import BaseModel, Field
 
 # Apply nest_asyncio to handle async operations in Streamlit
 nest_asyncio.apply()
+
+# Ensure Playwright browsers are installed
+try:
+    import subprocess
+    import sys
+    subprocess.run(["playwright", "install", "chromium"], check=True)
+except Exception as e:
+    st.error(f"Failed to install Playwright browser: {str(e)}")
+    st.info("If this error persists, please contact support.")
 
 # Define the Product model
 class Product(BaseModel):
@@ -35,11 +45,11 @@ async def _scrape_data(url, instruction, num_pages, all_pages, use_sitemap):
         schema=Product.model_json_schema(),
         extraction_type="schema",
         instruction=instruction,
-        chunk_token_threshold=1000,
-        overlap_rate=0.0,
+        chunk_token_threshold=chunk_size,
+        overlap_rate=overlap,
         apply_chunking=True,
         input_format="markdown",
-        extra_args={"temperature": 0.0, "max_tokens": 800},
+        extra_args={"temperature": temperature, "max_tokens": 800},
     )
 
     # Configure crawler
@@ -50,7 +60,7 @@ async def _scrape_data(url, instruction, num_pages, all_pages, use_sitemap):
         remove_overlay_elements=True,
         exclude_external_links=True
     )
-    browser_cfg = BrowserConfig(headless=True, verbose=True)
+    browser_cfg = BrowserConfig(headless=headless, verbose=True, timeout=browser_timeout * 1000)  # timeout in milliseconds
 
     # Fetch URLs from sitemap if enabled
     if use_sitemap:
@@ -117,7 +127,17 @@ with col2:
 
 # Expander for advanced settings
 with st.expander("Advanced Settings"):
-    st.write("Here you can configure additional scraping parameters.")
+    st.subheader("Browser Configuration")
+    headless = st.checkbox("Run browser in headless mode", value=True)
+    browser_timeout = st.number_input("Browser timeout (seconds)", value=30, min_value=10, step=5)
+    
+    st.subheader("Extraction Strategy")
+    chunk_size = st.number_input("Chunk token threshold", value=1000, min_value=100, step=100,
+                                help="Maximum number of tokens per chunk for text processing")
+    overlap = st.slider("Chunk overlap rate", value=0.0, min_value=0.0, max_value=0.5, step=0.1,
+                       help="Overlap between consecutive chunks (0.0 to 0.5)")
+    temperature = st.slider("LLM Temperature", value=0.0, min_value=0.0, max_value=1.0, step=0.1,
+                          help="Controls randomness in LLM responses (0.0 for focused, 1.0 for creative)")
 
 # Start scraping button
 if st.button("Start Scraping"):
@@ -150,3 +170,4 @@ if st.button("Start Scraping"):
                 st.error(f"An unexpected error occurred: {str(e)}. Please try again or contact support.")
     else:
         st.write("Please enter the URL and instructions to begin scraping.")
+
