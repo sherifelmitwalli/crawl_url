@@ -9,6 +9,9 @@ from pydantic import BaseModel
 import time
 import random
 
+# Set page config at the very beginning of the script
+st.set_page_config(page_title="AI Web Scraper", page_icon="🕷️", layout="wide")
+
 class ExtractedText(BaseModel):
     text: str
 
@@ -37,7 +40,7 @@ async def scrape_data(url: str, instruction: str, num_pages: int, all_pages: boo
         process_iframes=True,
         remove_overlay_elements=True,
         exclude_external_links=True,
-        timeout=30000,  # 30 seconds timeout
+        # Remove the 'timeout' parameter if it's not supported
     )
 
     browser_cfg = BrowserConfig(
@@ -109,8 +112,4 @@ if st.button("Start Scraping"):
                 st.error("Please check your API keys and ensure all dependencies are correctly installed.")
     else:
         st.warning("Please enter both the URL and instructions before starting.")
-
-# Add this at the end of your script to handle Streamlit's default caching behavior
-if __name__ == "__main__":
-    st.set_page_config(page_title="AI Web Scraper", page_icon="🕷️", layout="wide")
 
