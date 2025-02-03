@@ -8,37 +8,68 @@ import time
 import random
 from typing import List, Dict
 
-# Comprehensive Playwright and browser installation
-def setup_playwright():
+def safe_run_command(command):
+    """
+    Safely run a shell command with error handling
+    """
     try:
-        # Ensure pip is up to date
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", "pip"])
-        
-        # Install Playwright and its dependencies
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright"])
-        
-        # Use subprocess to run playwright install with verbose output
-        result = subprocess.run([sys.executable, "-m", "playwright", "install"], 
-                                capture_output=True, 
-                                text=True)
-        
-        # Install system dependencies
-        subprocess.check_call([sys.executable, "-m", "playwright", "install-deps"])
-        
-        st.success("Playwright and browsers installed successfully!")
-        return True
+        result = subprocess.run(
+            command, 
+            capture_output=True, 
+            text=True, 
+            check=True
+        )
+        return result.returncode == 0
     except subprocess.CalledProcessError as e:
-        st.error(f"Installation error: {e}")
-        st.error(f"Stdout: {e.stdout}")
-        st.error(f"Stderr: {e.stderr}")
+        st.error(f"Command failed: {' '.join(command)}")
+        st.error(f"Error output: {e.stderr}")
         return False
     except Exception as e:
-        st.error(f"Unexpected error during setup: {str(e)}")
+        st.error(f"Unexpected error: {str(e)}")
         return False
 
-# Attempt to set up Playwright before importing
+def setup_playwright():
+    """
+    Comprehensive Playwright setup with multiple fallback methods
+    """
+    st.info("Setting up Playwright...")
+    
+    # List of potential installation methods
+    install_methods = [
+        # Method 1: Direct pip install with playwright
+        [sys.executable, "-m", "pip", "install", "playwright"],
+        
+        # Method 2: Using pip with upgrade
+        [sys.executable, "-m", "pip", "install", "--upgrade", "playwright"],
+        
+        # Method 3: Using pip with force reinstall
+        [sys.executable, "-m", "pip", "install", "--force-reinstall", "playwright"]
+    ]
+
+    # Try different installation methods
+    for method in install_methods:
+        if safe_run_command(method):
+            # Attempt to install browsers
+            browser_install_commands = [
+                [sys.executable, "-m", "playwright", "install"],
+                ["playwright", "install"],
+                [sys.executable, "-c", "from playwright.sync_api import sync_playwright; sync_playwright().install()"]
+            ]
+            
+            for browser_cmd in browser_install_commands:
+                try:
+                    subprocess.run(browser_cmd, check=True)
+                    st.success("Playwright installed successfully!")
+                    return True
+                except Exception as e:
+                    st.warning(f"Browser installation method failed: {str(e)}")
+    
+    st.error("Could not install Playwright. Please check your environment.")
+    return False
+
+# Attempt to set up Playwright
 if not setup_playwright():
-    st.error("Failed to set up Playwright. Cannot proceed with web scraping.")
+    st.error("Playwright setup failed. Cannot proceed with web scraping.")
     st.stop()
 
 # Now import required libraries
@@ -82,7 +113,7 @@ async def scrape_data(url: str, instruction: str, num_pages: int, all_pages: boo
 
         browser_cfg = BrowserConfig(
             headless=True, 
-            verbose=True,  # Increased verbosity for debugging
+            verbose=True,
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         )
 
