@@ -60,7 +60,7 @@ async def _scrape_data(url, instruction, num_pages, all_pages, use_sitemap):
         remove_overlay_elements=True,
         exclude_external_links=True
     )
-    browser_cfg = BrowserConfig(headless=headless, verbose=True, timeout=browser_timeout * 1000)  # timeout in milliseconds
+    browser_cfg = BrowserConfig(headless=headless, verbose=True)
 
     # Fetch URLs from sitemap if enabled
     if use_sitemap:
@@ -128,8 +128,8 @@ with col2:
 # Expander for advanced settings
 with st.expander("Advanced Settings"):
     st.subheader("Browser Configuration")
-    headless = st.checkbox("Run browser in headless mode", value=True)
-    browser_timeout = st.number_input("Browser timeout (seconds)", value=30, min_value=10, step=5)
+    headless = st.checkbox("Run browser in headless mode", value=True, 
+                          help="When enabled, the browser runs in the background")
     
     st.subheader("Extraction Strategy")
     chunk_size = st.number_input("Chunk token threshold", value=1000, min_value=100, step=100,
