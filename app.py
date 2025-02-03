@@ -17,7 +17,6 @@ st.set_page_config(page_title="Advanced AI Web Scraper", page_icon="🕷️", la
 class ExtractedText(BaseModel):
     text: str
 
-@st.cache_data
 async def scrape_data(url: str, instruction: str, num_pages: int, all_pages: bool, custom_filters: List[str]) -> List[Dict[str, str]]:
     enhanced_instruction = (
         f"{instruction}\n\nEnsure the extracted text is relevant and excludes cookies, legal disclaimers,"
