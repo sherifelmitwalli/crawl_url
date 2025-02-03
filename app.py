@@ -8,16 +8,14 @@ from crawl4ai.extraction_strategy import LLMExtractionStrategy
 from pydantic import BaseModel
 import time
 import random
-import pandas as pd
-import plotly.express as px
 
 # Set page config at the very beginning of the script
-st.set_page_config(page_title="Advanced AI Web Scraper", page_icon="🕷️", layout="wide")
+st.set_page_config(page_title="AI Web Scraper", page_icon="🕷️", layout="wide")
 
 class ExtractedText(BaseModel):
     text: str
 
-async def scrape_data(url: str, instruction: str, num_pages: int, all_pages: bool, custom_filters: List[str]) -> List[Dict[str, str]]:
+async def scrape_data(url: str, instruction: str, num_pages: int, all_pages: bool) -> List[Dict[str, str]]:
     enhanced_instruction = (
         f"{instruction}\n\nEnsure the extracted text is relevant and excludes cookies, legal disclaimers,"
         " advertisements, and UI elements such as navigation bars and footers. Extract meaningful page content only."
@@ -42,6 +40,7 @@ async def scrape_data(url: str, instruction: str, num_pages: int, all_pages: boo
         process_iframes=True,
         remove_overlay_elements=True,
         exclude_external_links=True,
+        # Remove the 'timeout' parameter if it's not supported
     )
 
     browser_cfg = BrowserConfig(
@@ -52,10 +51,8 @@ async def scrape_data(url: str, instruction: str, num_pages: int, all_pages: boo
 
     async with AsyncWebCrawler(config=browser_cfg) as crawler:
         all_data = []
-        default_exclusions = ['cookie', 'privacy policy', 'terms of service', 'advertisement']
-        exclusion_patterns = re.compile('|'.join(default_exclusions + custom_filters), flags=re.IGNORECASE)
+        exclusion_patterns = re.compile(r'cookie|privacy policy|terms of service|advertisement', flags=re.IGNORECASE)
 
-        progress_bar = st.progress(0)
         for page in range(1, num_pages + 1):
             page_url = f"{url}?page={page}" if '?' in url else f"{url}/page/{page}"
             
@@ -80,12 +77,8 @@ async def scrape_data(url: str, instruction: str, num_pages: int, all_pages: boo
                 if attempt < 2:  # Wait before retrying, except on last attempt
                     time.sleep(random.uniform(1, 3))  # Random delay between retries
             
-            progress_bar.progress(page / num_pages)
-            
             if not all_pages and page >= num_pages:
                 break
-
-        progress_bar.empty()
 
         if not all_data:
             st.warning(f"No data extracted from {url}. Possible reasons:")
@@ -95,68 +88,30 @@ async def scrape_data(url: str, instruction: str, num_pages: int, all_pages: boo
 
         return all_data
 
-def visualize_data(data: List[Dict[str, str]]):
-    if not data:
-        st.warning("No data to visualize.")
-        return
+st.title("AI-Assisted Web Scraping")
 
-    df = pd.DataFrame(data)
-    
-    # Word count distribution
-    df['word_count'] = df['text'].apply(lambda x: len(x.split()))
-    fig = px.histogram(df, x='word_count', title='Distribution of Word Count in Extracted Text')
-    st.plotly_chart(fig)
+url_to_scrape = st.text_input("Enter the URL to scrape:")
+instruction_to_llm = st.text_area("Enter instructions for what to scrape:")
+num_pages = st.number_input("Enter the number of pages to scrape:", min_value=1, step=1)
+all_pages = st.checkbox("Scrape all pages")
 
-    # Most common words
-    all_words = ' '.join(df['text']).lower().split()
-    word_freq = pd.Series(all_words).value_counts().head(20)
-    fig = px.bar(x=word_freq.index, y=word_freq.values, title='Top 20 Most Common Words')
-    st.plotly_chart(fig)
+if st.button("Start Scraping"):
+    if url_to_scrape and instruction_to_llm:
+        with st.spinner("Scraping in progress..."):
+            try:
+                data = asyncio.run(scrape_data(url_to_scrape, instruction_to_llm, num_pages, all_pages))
+                
+                if data:
+                    formatted_data = "\n".join([item['text'] for item in data])
+                    st.download_button("Download Data", formatted_data, "scraped_data.txt")
+                    st.success(f"Successfully scraped {len(data)} items.")
+                else:
+                    st.warning("No data was scraped. Please check the URL and try again.")
+            except Exception as e:
+                st.error(f"An unexpected error occurred: {str(e)}")
+                st.error("Please check your API keys and ensure all dependencies are correctly installed.")
+    else:
+        st.warning("Please enter both the URL and instructions before starting.")
 
-def main():
-    st.title("Advanced AI-Assisted Web Scraping")
-
-    with st.sidebar:
-        st.header("Configuration")
-        url_to_scrape = st.text_input("Enter the URL to scrape:")
-        instruction_to_llm = st.text_area("Enter instructions for what to scrape:")
-        num_pages = st.number_input("Enter the number of pages to scrape:", min_value=1, step=1)
-        all_pages = st.checkbox("Scrape all pages")
-        custom_filters = st.text_input("Enter custom filter words (comma-separated):").split(',')
-        custom_filters = [f.strip() for f in custom_filters if f.strip()]
-
-    if st.sidebar.button("Start Scraping"):
-        if url_to_scrape and instruction_to_llm:
-            with st.spinner("Scraping in progress..."):
-                try:
-                    data = asyncio.run(scrape_data(url_to_scrape, instruction_to_llm, num_pages, all_pages, custom_filters))
-                    
-                    if data:
-                        st.success(f"Successfully scraped {len(data)} items.")
-                        
-                        # Display data
-                        st.subheader("Scraped Data Preview")
-                        st.dataframe(pd.DataFrame(data).head())
-                        
-                        # Visualize data
-                        st.subheader("Data Visualization")
-                        visualize_data(data)
-                        
-                        # Download options
-                        st.subheader("Download Options")
-                        formatted_data = "\n".join([item['text'] for item in data])
-                        st.download_button("Download as TXT", formatted_data, "scraped_data.txt")
-                        st.download_button("Download as JSON", json.dumps(data, indent=2), "scraped_data.json")
-                        st.download_button("Download as CSV", pd.DataFrame(data).to_csv(index=False), "scraped_data.csv")
-                    else:
-                        st.warning("No data was scraped. Please check the URL and try again.")
-                except Exception as e:
-                    st.error(f"An unexpected error occurred: {str(e)}")
-                    st.error("Please check your API keys and ensure all dependencies are correctly installed.")
-        else:
-            st.warning("Please enter both the URL and instructions before starting.")
-
-if __name__ == "__main__":
-    main()
 
 
