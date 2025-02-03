@@ -49,7 +49,6 @@ async def _scrape_data(url, instruction, num_pages, all_pages, levels, use_sitem
         process_iframes=False,
         remove_overlay_elements=True,
         exclude_external_links=True,
-        click_elements=True,
         levels=levels
     )
     browser_cfg = BrowserConfig(headless=True, verbose=True)
@@ -153,4 +152,3 @@ if st.button("Start Scraping"):
                 st.error(f"An unexpected error occurred: {str(e)}. Please try again or contact support.")
     else:
         st.write("Please enter the URL, instructions, number of pages, and levels.")
-
