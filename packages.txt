@@ -12,5 +12,5 @@ libatspi2.0-0
 libnss3
 libdrm2
 libxshmfence1
-libgtk-3-0
-libharfbuzz-icu0  # Critical missing dependency
+libgtk-3-0  # Required for Playwright GUI rendering
+
