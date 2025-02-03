@@ -2,7 +2,7 @@ streamlit
 openai
 asyncio
 pydantic
-crawl4ai==1.0.0
+crawl4ai
 nest-asyncio
 playwright
 pandas
