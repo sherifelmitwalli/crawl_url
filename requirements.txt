@@ -2,5 +2,5 @@ streamlit
 openai
 asyncio
 pydantic
-crawl4ai
+crawl4ai=1.0.0
 nest-asyncio
