@@ -37,7 +37,6 @@ async def scrape_data(url: str, instruction: str, num_pages: int, all_pages: boo
         process_iframes=True,
         remove_overlay_elements=True,
         exclude_external_links=True,
-        wait_for_selector='body',  # Wait for body to ensure page load
         timeout=30000,  # 30 seconds timeout
     )
 
@@ -107,5 +106,11 @@ if st.button("Start Scraping"):
                     st.warning("No data was scraped. Please check the URL and try again.")
             except Exception as e:
                 st.error(f"An unexpected error occurred: {str(e)}")
+                st.error("Please check your API keys and ensure all dependencies are correctly installed.")
     else:
         st.warning("Please enter both the URL and instructions before starting.")
+
+# Add this at the end of your script to handle Streamlit's default caching behavior
+if __name__ == "__main__":
+    st.set_page_config(page_title="AI Web Scraper", page_icon="🕷️", layout="wide")
+
