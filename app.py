@@ -18,16 +18,16 @@ class Product(BaseModel):
     price: str
 
 # Function to run asynchronous scraping
-def run_async_scraper(url, instruction, num_pages, all_pages, levels, use_sitemap=False):
+def run_async_scraper(url, instruction, num_pages, all_pages, use_sitemap=False):
     try:
         loop = asyncio.get_event_loop()
-        return loop.run_until_complete(_scrape_data(url, instruction, num_pages, all_pages, levels, use_sitemap))
+        return loop.run_until_complete(_scrape_data(url, instruction, num_pages, all_pages, use_sitemap))
     except Exception as e:
         st.error(f"Error during scraping: {str(e)}")
         return []
 
 # Asynchronous scraping logic
-async def _scrape_data(url, instruction, num_pages, all_pages, levels, use_sitemap):
+async def _scrape_data(url, instruction, num_pages, all_pages, use_sitemap):
     # Initialize extraction strategy
     llm_strategy = LLMExtractionStrategy(
         provider=st.secrets["MODEL"],
@@ -48,8 +48,7 @@ async def _scrape_data(url, instruction, num_pages, all_pages, levels, use_sitem
         cache_mode=CacheMode.BYPASS,
         process_iframes=False,
         remove_overlay_elements=True,
-        exclude_external_links=True,
-        levels=levels
+        exclude_external_links=True
     )
     browser_cfg = BrowserConfig(headless=True, verbose=True)
 
@@ -114,7 +113,6 @@ with col1:
 with col2:
     num_pages = st.number_input("Enter the number of pages to scrape:", min_value=1, step=1)
     all_pages = st.checkbox("Scrape all pages")
-    levels = st.number_input("Enter the number of levels to scrape:", min_value=1, step=1)
     use_sitemap = st.checkbox("Use sitemap for crawling")
 
 # Expander for advanced settings
@@ -128,7 +126,7 @@ if st.button("Start Scraping"):
             try:
                 # Progress bar
                 progress_bar = st.progress(0)
-                data = run_async_scraper(url_to_scrape, instruction_to_llm, num_pages, all_pages, levels, use_sitemap)
+                data = run_async_scraper(url_to_scrape, instruction_to_llm, num_pages, all_pages, use_sitemap)
 
                 # Update progress bar
                 progress_bar.progress(100)
@@ -151,4 +149,4 @@ if st.button("Start Scraping"):
             except Exception as e:
                 st.error(f"An unexpected error occurred: {str(e)}. Please try again or contact support.")
     else:
-        st.write("Please enter the URL, instructions, number of pages, and levels.")
+        st.write("Please enter the URL and instructions to begin scraping.")
