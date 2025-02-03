@@ -1,4 +1,7 @@
+# Place page config at the absolute top of the file
 import streamlit as st
+st.set_page_config(page_title="AI Web Scraper", page_icon="🕷️", layout="wide")
+
 import asyncio
 import json
 import re
@@ -76,9 +79,6 @@ if not setup_playwright():
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
 from crawl4ai.extraction_strategy import LLMExtractionStrategy
 from pydantic import BaseModel
-
-# Set page config
-st.set_page_config(page_title="AI Web Scraper", page_icon="🕷️", layout="wide")
 
 class ExtractedText(BaseModel):
     text: str
@@ -192,4 +192,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
