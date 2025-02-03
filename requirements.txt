@@ -4,3 +4,5 @@ asyncio
 pydantic
 crawl4ai
 nest-asyncio
+plotly
+
