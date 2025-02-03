@@ -1,4 +1,3 @@
-import os
 import streamlit as st
 import asyncio
 import json
@@ -9,12 +8,6 @@ from crawl4ai.extraction_strategy import LLMExtractionStrategy
 from pydantic import BaseModel
 import time
 import random
-from playwright.sync_api import sync_playwright
-
-# Install Playwright browsers if not already installed
-if not os.path.exists("/home/appuser/.cache/ms-playwright"):
-    from subprocess import run
-    run(["playwright", "install", "chromium"], check=True)
 
 # Set page config at the very beginning of the script
 st.set_page_config(page_title="AI Web Scraper", page_icon="🕷️", layout="wide")
@@ -47,6 +40,7 @@ async def scrape_data(url: str, instruction: str, num_pages: int, all_pages: boo
         process_iframes=True,
         remove_overlay_elements=True,
         exclude_external_links=True,
+        # Remove the 'timeout' parameter if it's not supported
     )
 
     browser_cfg = BrowserConfig(
@@ -118,6 +112,7 @@ if st.button("Start Scraping"):
                 st.error("Please check your API keys and ensure all dependencies are correctly installed.")
     else:
         st.warning("Please enter both the URL and instructions before starting.")
+
 
 
 
