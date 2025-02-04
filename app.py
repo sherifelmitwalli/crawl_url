@@ -1,6 +1,6 @@
 # Place page config at the absolute top of the file
 import streamlit as st
-st.set_page_config(page_title="AI Web Scraper", page_icon="🕷️", layout="wide")
+st.set_page_config(page_title="AI Web Scraper Pro", page_icon="🕷️", layout="wide")
 
 import asyncio
 import json
@@ -9,351 +9,564 @@ import subprocess
 import sys
 import time
 import random
-from typing import List, Dict
+import aiohttp
+import logging
+from datetime import datetime, timedelta
+from typing import List, Dict, Optional, Any
+from urllib.parse import urlparse
+from functools import wraps
+from contextlib import asynccontextmanager
 
-# ----------------------- Helper Functions -----------------------
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
-def safe_run_command(command):
-    """
-    Safely run a shell command with error handling.
-    """
+# ----------------------- Security & Validation -----------------------
+
+def validate_url(url: str) -> bool:
+    """Validate URL format and scheme."""
     try:
-        result = subprocess.run(
-            command, 
-            capture_output=True, 
-            text=True, 
-            check=True
-        )
-        return result.returncode == 0
-    except subprocess.CalledProcessError as e:
-        st.error(f"Command failed: {' '.join(command)}")
-        st.error(f"Error output: {e.stderr}")
-        return False
+        result = urlparse(url)
+        return all([
+            result.scheme in ['http', 'https'],
+            result.netloc,
+            len(url) < 2000  # Standard URL length limit
+        ])
     except Exception as e:
-        st.error(f"Unexpected error: {str(e)}")
+        logger.error(f"URL validation error: {str(e)}")
         return False
 
-def setup_playwright():
-    """
-    Comprehensive Playwright setup with multiple fallback methods.
-    """
-    st.info("Setting up Playwright...")
-    
-    install_methods = [
-        [sys.executable, "-m", "pip", "install", "playwright"],
-        [sys.executable, "-m", "pip", "install", "--upgrade", "playwright"],
-        [sys.executable, "-m", "pip", "install", "--force-reinstall", "playwright"]
-    ]
+def sanitize_input(input_str: str) -> str:
+    """Sanitize user input to prevent injection attacks."""
+    # Remove any potentially dangerous characters
+    return re.sub(r'[;<>&|]', '', input_str)
 
-    for method in install_methods:
-        if safe_run_command(method):
-            browser_install_commands = [
-                [sys.executable, "-m", "playwright", "install"],
-                ["playwright", "install"],
-                [sys.executable, "-c", "from playwright.sync_api import sync_playwright; sync_playwright().install()"]
-            ]
-            for browser_cmd in browser_install_commands:
-                try:
-                    subprocess.run(browser_cmd, check=True)
-                    st.success("Playwright installed successfully!")
-                    return True
-                except Exception as e:
-                    st.warning(f"Browser installation method failed: {str(e)}")
-    
-    st.error("Could not install Playwright. Please check your environment.")
-    return False
+# ----------------------- Rate Limiting -----------------------
 
-# Attempt to set up Playwright
-if not setup_playwright():
-    st.error("Playwright setup failed. Cannot proceed with web scraping.")
-    st.stop()
-
-# ----------------------- LLM Error Check -----------------------
-import openai
-
-def is_error_page(content: str) -> bool:
-    """
-    Detect if the webpage content is an error/rejection message.
-    Returns True if the content appears to be an error page, False otherwise.
-    """
-    # Define critical phrases that almost certainly indicate an error page
-    critical_phrases = [
-        "page you are trying to access is not available",
-        "return to the homepage",
-        "web archive",
-        "having difficulty finding",
-        "contact the web",
-        "please return to",
-        "alternatively, you may",
-    ]
-    
-    # Common patterns in error pages
-    error_patterns = [
-        r"page.*not available",
-        r"return to.*homepage",
-        r"web.*archive",
-        r"contact.*service",
-        r"previous version",
-        r"alternative.*navigate",
-        r"difficulty finding",
-        r"cannot access",
-        r"blocked.*access",
-    ]
-
-    # Check for exact matches of critical phrases
-    content_lower = content.lower().strip()
-    for phrase in critical_phrases:
-        if phrase in content_lower:
-            st.info(f"Error page detected by critical phrase: '{phrase}'")
-            return True
-
-    # Check for regex patterns
-    for pattern in error_patterns:
-        if re.search(pattern, content_lower, re.IGNORECASE):
-            st.info(f"Error page detected by pattern: '{pattern}'")
-            return True
-
-    # Check content length and characteristics
-    word_count = len(content_lower.split())
-    if word_count < 100:  # Error messages tend to be short
-        sentences = content_lower.split('.')
-        error_indicators = sum(1 for s in sentences if any(p in s for p in critical_phrases))
-        if error_indicators / len(sentences) > 0.3:  # If more than 30% of sentences contain error indicators
-            st.info("Error page detected by content analysis")
-            return True
-
-    # Use LLM for more complex cases
-    try:
-        from crawl4ai.extraction_strategy import LLMExtractionStrategy
-        from pydantic import BaseModel
-
-        class ErrorAnalysis(BaseModel):
-            is_error: bool
-            reason: str
-
-        instruction = """Analyze if this is an error/rejection page instead of actual content.
-        Common signs of error pages:
-        1. Instructions to return to homepage
-        2. Mentions of web archives
-        3. Contact information for support
-        4. Page unavailability notices
-        5. References to navigation or browsing elsewhere
+class RateLimiter:
+    def __init__(self, max_per_second: float):
+        self.min_interval = 1.0 / max_per_second
+        self.last_time_called = 0.0
         
-        Content to analyze: {content}
-        
-        Respond with a clear Yes/No and brief reason."""
+    async def acquire(self):
+        """Acquire permission to proceed, waiting if necessary."""
+        current_time = time.time()
+        elapsed = current_time - self.last_time_called
+        if elapsed < self.min_interval:
+            await asyncio.sleep(self.min_interval - elapsed)
+        self.last_time_called = time.time()
 
-        error_analyzer = LLMExtractionStrategy(
-            provider=st.secrets["MODEL"],
-            api_token=st.secrets["OPENAI_API_KEY"],
-            schema=ErrorAnalysis.model_json_schema(),
-            extraction_type="schema",
-            instruction=instruction,
-            extra_args={"temperature": 0.0}
-        )
-        
-        result = error_analyzer.extract(content)
-        
-        if result.get('is_error'):
-            st.info(f"Error page detected by LLM: {result.get('reason')}")
-            return True
+# ----------------------- Circuit Breaker -----------------------
+
+class CircuitBreaker:
+    def __init__(
+        self,
+        failure_threshold: int = 5,
+        reset_timeout: int = 60,
+        half_open_timeout: int = 30
+    ):
+        self.failure_count = 0
+        self.failure_threshold = failure_threshold
+        self.reset_timeout = reset_timeout
+        self.half_open_timeout = half_open_timeout
+        self.last_failure_time = 0
+        self.state = "closed"
+        self._lock = asyncio.Lock()
+
+    async def call(self, func, *args, **kwargs):
+        async with self._lock:
+            if self.state == "open":
+                if time.time() - self.last_failure_time > self.reset_timeout:
+                    self.state = "half-open"
+                    logger.info("Circuit breaker state changed to half-open")
+                else:
+                    raise Exception("Circuit breaker is open")
+
+            try:
+                result = await func(*args, **kwargs)
+                if self.state == "half-open":
+                    self.state = "closed"
+                    self.failure_count = 0
+                    logger.info("Circuit breaker state changed to closed")
+                return result
+            except Exception as e:
+                self.failure_count += 1
+                self.last_failure_time = time.time()
+                if self.failure_count >= self.failure_threshold:
+                    self.state = "open"
+                    logger.warning(f"Circuit breaker opened after {self.failure_count} failures")
+                raise e
+
+# ----------------------- Caching -----------------------
+
+class TimedCache:
+    def __init__(self, timeout_minutes: int = 30, max_size: int = 1000):
+        self.timeout = timedelta(minutes=timeout_minutes)
+        self.max_size = max_size
+        self.cache = {}
+        self._lock = asyncio.Lock()
+
+    async def get_or_set(self, key: str, async_func, *args, **kwargs) -> Any:
+        async with self._lock:
+            now = datetime.now()
             
-        return False
-        
-    except Exception as e:
-        st.warning(f"LLM analysis failed, falling back to pattern matching: {str(e)}")
-        # If more than 2 critical phrases are found, consider it an error page
-        matches = sum(1 for phrase in critical_phrases if phrase in content_lower)
-        return matches >= 2
+            # Clean expired entries
+            expired_keys = [k for k, (_, timestamp) in self.cache.items()
+                          if now - timestamp > self.timeout]
+            for k in expired_keys:
+                del self.cache[k]
 
-def handle_error_page(content: str) -> bool:
-    """
-    Helper function to handle error page detection and logging.
-    Returns True if error page is detected, False otherwise.
-    """
-    is_error = is_error_page(content)
-    if is_error:
-        st.warning("Error page detected. Content appears to be a rejection/error message:")
-        st.code(content[:200] + "..." if len(content) > 200 else content)  # Show first 200 chars
-        st.info("Initiating retry with alternative access method...")
-    return is_error
+            # Check cache size
+            if len(self.cache) >= self.max_size:
+                # Remove oldest entries
+                sorted_items = sorted(self.cache.items(), key=lambda x: x[1][1])
+                self.cache = dict(sorted_items[len(sorted_items)//2:])
 
-# ----------------------- Proxy Collection -----------------------
-# We'll use ProxyBroker to collect proxies automatically.
-try:
-    from proxybroker import Broker
-except ImportError:
-    st.error("ProxyBroker is not installed. Please install it with 'pip install proxybroker'.")
-    st.stop()
+            if key in self.cache:
+                result, timestamp = self.cache[key]
+                if now - timestamp < self.timeout:
+                    return result
 
-async def fetch_proxies(limit: int = 10, timeout: int = 10) -> List[str]:
-    """
-    Use ProxyBroker to automatically find free HTTP/HTTPS proxies.
-    Returns a list of proxies in the format 'host:port'.
-    """
-    proxies = set()
+            try:
+                result = await async_func(*args, **kwargs)
+                self.cache[key] = (result, now)
+                return result
+            except Exception as e:
+                logger.error(f"Cache operation failed: {str(e)}")
+                raise
 
-    async def save(proxy):
-        if proxy and proxy.host and proxy.port:
-            proxies.add(f"{proxy.host}:{proxy.port}")
+# ----------------------- Resource Management -----------------------
 
-    broker = Broker(save, timeout=timeout)
-    await broker.find(types=['HTTP', 'HTTPS'], limit=limit)
-    return list(proxies)
+@asynccontextmanager
+async def get_session():
+    """Create and manage an aiohttp session with proper cleanup."""
+    timeout = aiohttp.ClientTimeout(total=30)
+    connector = aiohttp.TCPConnector(limit=10, force_close=True)
+    
+    async with aiohttp.ClientSession(
+        connector=connector,
+        timeout=timeout,
+        headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+    ) as session:
+        try:
+            yield session
+        finally:
+            await connector.close()
 
-# ----------------------- Crawl4ai and Extraction -----------------------
-from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
-from crawl4ai.extraction_strategy import LLMExtractionStrategy
-from pydantic import BaseModel
+# ----------------------- Proxy Management -----------------------
 
-class ExtractedText(BaseModel):
-    text: str
+class ProxyManager:
+    def __init__(self, max_proxies: int = 10):
+        self.proxies = []
+        self.max_proxies = max_proxies
+        self.current_index = 0
+        self._lock = asyncio.Lock()
 
-async def scrape_data(url: str, instruction: str, num_pages: int, all_pages: bool) -> List[Dict[str, str]]:
-    try:
-        # Enhance the instruction for better extraction
-        enhanced_instruction = (
-            f"{instruction}\n\nEnsure the extracted text is relevant and excludes cookies, legal disclaimers, "
-            "advertisements, and UI elements such as navigation bars and footers. Extract meaningful page content only."
-        )
-
-        llm_strategy = LLMExtractionStrategy(
-            provider=st.secrets["MODEL"],
-            api_token=st.secrets["OPENAI_API_KEY"],
-            schema=ExtractedText.model_json_schema(),
-            extraction_type="schema",
-            instruction=enhanced_instruction,
-            chunk_token_threshold=1000,
-            overlap_rate=0.0,
-            apply_chunking=True,
-            input_format="markdown",
-            extra_args={"temperature": 0.0, "max_tokens": 800},
-        )
-
-        crawl_config = CrawlerRunConfig(
-            extraction_strategy=llm_strategy,
-            cache_mode=CacheMode.BYPASS,
-            process_iframes=True,
-            remove_overlay_elements=True,
-            exclude_external_links=True,
-        )
-
-        # Updated browser configuration with a modern user agent and additional args to reduce detection.
-        default_browser_cfg = BrowserConfig(
-            headless=True, 
-            verbose=True,
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
-            args=["--disable-blink-features=AutomationControlled"]
-        )
-
-        # Automatically fetch a list of proxies to use as fallback
-        st.info("Collecting free proxies...")
-        proxies = await fetch_proxies(limit=10)
-        if proxies:
-            st.info(f"Found {len(proxies)} proxies.")
-        else:
-            st.warning("No proxies found. Will proceed without proxy fallback.")
-
-        all_data = []
-        exclusion_patterns = re.compile(r'cookie|privacy policy|terms of service|advertisement', flags=re.IGNORECASE)
-
-        for page in range(1, num_pages + 1):
-            # Construct page URL
-            page_url = f"{url}?page={page}" if '?' in url else f"{url}/page/{page}"
-            for attempt in range(3):  # Retry mechanism; first attempt without proxy, then with proxy if needed.
-                try:
-                    # Use default config on first attempt, then a proxy config on subsequent attempts.
-                    if attempt == 0:
-                        current_browser_cfg = default_browser_cfg
-                    else:
-                        if proxies:
-                            selected_proxy = random.choice(proxies)
-                            st.info(f"Attempting page {page} with proxy: {selected_proxy}")
-                            current_browser_cfg = BrowserConfig(
-                                headless=True, 
-                                verbose=True,
-                                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
-                                args=["--disable-blink-features=AutomationControlled"],
-                                proxy=selected_proxy  # Assumes BrowserConfig accepts a "proxy" parameter.
-                            )
-                        else:
-                            st.warning("No proxies available; retrying without proxy.")
-                            current_browser_cfg = default_browser_cfg
-
-                    async with AsyncWebCrawler(config=current_browser_cfg) as crawler:
-                        result = await crawler.arun(url=page_url, config=crawl_config)
-                    
-                    # Check if the fetched content is valid and not an error or rejection page.
-                    if result.success and result.extracted_content and result.extracted_content.strip():
-                        if is_error_page(result.extracted_content):
-                            st.warning(f"LLM detected a rejection/error page on page {page} (attempt {attempt + 1}). Retrying...")
-                            time.sleep(2)
-                            continue
-
-                        try:
-                            data = json.loads(result.extracted_content)
-                            # Filter out unwanted content
-                            filtered_data = [item for item in data if not exclusion_patterns.search(item["text"])]
-                            all_data.extend(filtered_data)
-                            break  # Successful extraction; exit the retry loop for this page
-                        except json.JSONDecodeError:
-                            st.warning(f"Failed to decode JSON on page {page}. Retrying...")
-                            time.sleep(2)
-                    else:
-                        st.warning(f"No valid content returned on page {page} (attempt {attempt + 1}). Retrying...")
-                        time.sleep(2)
+    async def refresh_proxies(self):
+        """Fetch and validate new proxies."""
+        async with self._lock:
+            try:
+                from proxybroker import Broker
+                proxies = set()
                 
-                except Exception as e:
-                    st.error(f"Error processing page {page}: {str(e)}. Retrying...")
-                    time.sleep(2)
+                async def save(proxy):
+                    if len(proxies) < self.max_proxies:
+                        proxy_str = f"{proxy.host}:{proxy.port}"
+                        if await self.validate_proxy(proxy_str):
+                            proxies.add(proxy_str)
+
+                broker = Broker(save)
+                await broker.find(types=['HTTP', 'HTTPS'], limit=self.max_proxies * 2)
+                self.proxies = list(proxies)
+                logger.info(f"Refreshed proxy list with {len(self.proxies)} valid proxies")
+            except Exception as e:
+                logger.error(f"Failed to refresh proxies: {str(e)}")
+
+    async def validate_proxy(self, proxy: str) -> bool:
+        """Validate proxy by testing connection."""
+        try:
+            async with get_session() as session:
+                async with session.get(
+                    'https://httpbin.org/ip',
+                    proxy=f"http://{proxy}",
+                    timeout=5
+                ) as response:
+                    return response.status == 200
+        except Exception:
+            return False
+
+    async def get_next_proxy(self) -> Optional[str]:
+        """Get next proxy from the pool."""
+        if not self.proxies:
+            await self.refresh_proxies()
+        
+        if self.proxies:
+            self.current_index = (self.current_index + 1) % len(self.proxies)
+            return self.proxies[self.current_index]
+        return None
+
+# ----------------------- Playwright Setup -----------------------
+
+async def setup_playwright():
+    """Asynchronous Playwright setup with comprehensive error handling."""
+    try:
+        import playwright
+        logger.info("Playwright already installed")
+        return True
+    except ImportError:
+        logger.info("Installing Playwright...")
+        
+        install_commands = [
+            [sys.executable, "-m", "pip", "install", "playwright"],
+            [sys.executable, "-m", "playwright", "install"],
+        ]
+
+        for cmd in install_commands:
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await process.communicate()
+                
+                if process.returncode != 0:
+                    logger.error(f"Command failed: {' '.join(cmd)}")
+                    logger.error(f"Error output: {stderr.decode()}")
+                    continue
+                    
+                logger.info(f"Successfully executed: {' '.join(cmd)}")
+                return True
+                
+            except Exception as e:
+                logger.error(f"Failed to execute command: {str(e)}")
+                continue
+                
+        return False
+
+# ----------------------- Scraping Logic -----------------------
+
+class WebScraper:
+    def __init__(self):
+        self.rate_limiter = RateLimiter(max_per_second=2)
+        self.circuit_breaker = CircuitBreaker()
+        self.cache = TimedCache()
+        self.proxy_manager = ProxyManager()
+
+    async def scrape_page(self, url: str, instruction: str) -> Dict:
+        """Scrape a single page with comprehensive error handling and retries."""
+        if not validate_url(url):
+            raise ValueError("Invalid URL provided")
+
+        async def _scrape_attempt():
+            await self.rate_limiter.acquire()
             
-            if not all_pages and page >= num_pages:
-                break
+            from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
+            from crawl4ai.extraction_strategy import LLMExtractionStrategy
+            
+            browser_config = BrowserConfig(
+                headless=True,
+                verbose=True,
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
+                ),
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-dev-shm-usage",
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox"
+                ]
+            )
 
-        if not all_data:
-            st.warning(f"No data extracted from {url}. Possible reasons:")
-            st.info("- The page might be dynamically loaded")
-            st.info("- The content might require specific browser interactions")
-            st.info("- Anti-scraping measures might be in place (rejection/error page detected)")
+            llm_strategy = LLMExtractionStrategy(
+                provider=st.secrets["MODEL"],
+                api_token=st.secrets["OPENAI_API_KEY"],
+                extraction_type="schema",
+                instruction=instruction,
+                chunk_token_threshold=1000,
+                overlap_rate=0.1,
+                apply_chunking=True,
+                input_format="markdown",
+                extra_args={"temperature": 0.0, "max_tokens": 800}
+            )
 
-        return all_data
-    except Exception as e:
-        st.error(f"Unexpected error in scrape_data: {str(e)}")
-        return []
+            crawl_config = CrawlerRunConfig(
+                extraction_strategy=llm_strategy,
+                process_iframes=True,
+                remove_overlay_elements=True,
+                exclude_external_links=True
+            )
 
-# ----------------------- Main Streamlit App -----------------------
+            async with AsyncWebCrawler(config=browser_config) as crawler:
+                result = await crawler.arun(url=url, config=crawl_config)
+                return result
+
+        for attempt in range(3):
+            try:
+                # Try to get from cache first
+                cache_key = f"{url}_{hash(instruction)}"
+                result = await self.cache.get_or_set(
+                    cache_key,
+                    self.circuit_breaker.call,
+                    _scrape_attempt
+                )
+                
+                if result.success and result.extracted_content:
+                    return json.loads(result.extracted_content)
+                    
+            except Exception as e:
+                logger.error(f"Scraping attempt {attempt + 1} failed: {str(e)}")
+                
+                # Get new proxy for next attempt
+                proxy = await self.proxy_manager.get_next_proxy()
+                if proxy:
+                    logger.info(f"Switching to proxy: {proxy}")
+                
+                # Exponential backoff
+                await asyncio.sleep(2 ** attempt)
+                
+        raise Exception("All scraping attempts failed")
+
+    async def scrape_multiple_pages(
+        self,
+        base_url: str,
+        instruction: str,
+        num_pages: int,
+        all_pages: bool
+    ) -> List[Dict]:
+        """Scrape multiple pages with parallel processing."""
+        tasks = []
+        for page in range(1, num_pages + 1):
+            page_url = (
+                f"{base_url}?page={page}"
+                if '?' in base_url
+                else f"{base_url}/page/{page}"
+            )
+            tasks.append(self.scrape_page(page_url, instruction))
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        valid_results = []
+        for result in results:
+            if isinstance(result, Exception):
+                logger.error(f"Page scraping failed: {str(result)}")
+            else:
+                valid_results.extend(result)
+
+        return valid_results
+
+# ----------------------- Streamlit Interface -----------------------
 
 def main():
-    st.title("AI-Assisted Web Scraping")
+    st.title("AI-Assisted Web Scraper Pro")
+    
+    # Sidebar for advanced options
+    with st.sidebar:
+        st.header("Advanced Options")
+        max_retries = st.slider("Max Retries", 1, 5, 3)
+        use_proxies = st.checkbox("Use Proxy Rotation", value=True)
+        cache_timeout = st.slider("Cache Timeout (minutes)", 5, 60, 30)
 
+    # Main content
     url_to_scrape = st.text_input("Enter the URL to scrape:")
-    instruction_to_llm = st.text_area("Enter instructions for what to scrape:")
-    num_pages = st.number_input("Enter the number of pages to scrape:", min_value=1, max_value=10, value=1, step=1)
-    all_pages = st.checkbox("Scrape all pages")
+    instruction_to_llm = st.text_area(
+        "Enter instructions for what to scrape:",
+        help="Be specific about what content you want to extract."
+    )
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        num_pages = st.number_input(
+            "Number of pages to scrape:",
+            min_value=1,
+            max_value=10,
+            value=1
+        )
+    with col2:
+        all_pages = st.checkbox("Scrape all available pages")
 
-    if st.button("Start Scraping"):
-        if url_to_scrape and instruction_to_llm:
+    if st.button("Start Scraping", type="primary"):
+        if not url_to_scrape or not instruction_to_llm:
+            st.warning("Please enter both URL and instructions.")
+            return
+            
+        if not validate_url(url_to_scrape):
+            st.error("Please enter a valid HTTP or HTTPS URL.")
+            return
+
+        try:
+            # Initialize progress
+            progress = st.progress(0)
+            status = st.empty()
+            
+            # Initialize scraper
+            scraper = WebScraper()
+            
+            # Run scraping operation
             with st.spinner("Scraping in progress..."):
-                try:
-                    data = asyncio.run(asyncio.wait_for(
-                        scrape_data(url_to_scrape, instruction_to_llm, num_pages, all_pages),
-                        timeout=180  # Adjust timeout as needed
-                    ))
+                data = asyncio.run(
+                    scraper.scrape_multiple_pages(
+                        url_to_scrape,
+                        instruction_to_llm,
+                        num_pages,
+                        all_pages
+                    )
+                )
+
+                if data:
+                    # Format data for download
+                    formatted_data = json.dumps(data, indent=2)
                     
-                    if data:
-                        formatted_data = "\n".join([item['text'] for item in data])
-                        st.download_button("Download Data", formatted_data, "scraped_data.txt")
-                        st.success(f"Successfully scraped {len(data)} items.")
-                    else:
-                        st.warning("No data was scraped. Please check the URL and try again.")
-                except asyncio.TimeoutError:
-                    st.error("Scraping timed out. The website might be slow or unresponsive.")
-                except Exception as e:
-                    st.error(f"An unexpected error occurred: {str(e)}")
-                    st.error("Please check your URL, API keys, and internet connection.")
-        else:
-            st.warning("Please enter both the URL and instructions before starting.")
+                    # Create download buttons
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.download_button(
+                            "Download as JSON",
+                            formatted_data,
+                            "scraped_data.json",
+                            mime="application/json"
+                        )
+                    with col2:
+                        st.download_button(
+                            "Download as TXT",
+                            "\n".join(item['text'] for item in data),
+                            "scraped_data.txt"
+                        )
+
+                    # Show summary
+                    st.success(f"Successfully scraped {len(data)} items!")
+                    
+                    # Display sample of results
+                    with st.expander("View Sample Results"):
+                        st.json(data[:5] if len(data) > 5 else data)
+                    
+                    # Display statistics
+                    st.subheader("Scraping Statistics")
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Total Items", len(data))
+                    with col2:
+                        avg_length = sum(len(item['text']) for item in data) / len(data)
+                        st.metric("Avg Content Length", f"{avg_length:.0f} chars")
+                    with col3:
+                        st.metric("Pages Scraped", num_pages)
+
+                else:
+                    st.warning("No data was scraped. This could be due to:")
+                    st.info("• The website might be blocking automated access")
+                    st.info("• The content might not match your instructions")
+                    st.info("• The URL might be incorrect or inaccessible")
+                    st.info("• The website might require JavaScript")
+                    
+        except Exception as e:
+            st.error(f"An error occurred: {str(e)}")
+            st.info("Please try:")
+            st.info("• Checking your internet connection")
+            st.info("• Verifying the URL is accessible")
+            st.info("• Adjusting your scraping instructions")
+            st.info("• Reducing the number of pages")
+            logger.error(f"Scraping failed: {str(e)}", exc_info=True)
+
+# ----------------------- Monitoring & Analytics -----------------------
+
+class ScrapingMetrics:
+    def __init__(self):
+        self.success_count = 0
+        self.failure_count = 0
+        self.total_time = 0
+        self.start_time = None
+        self._lock = asyncio.Lock()
+
+    async def record_start(self):
+        async with self._lock:
+            self.start_time = time.time()
+
+    async def record_success(self, duration: float):
+        async with self._lock:
+            self.success_count += 1
+            self.total_time += duration
+
+    async def record_failure(self, duration: float):
+        async with self._lock:
+            self.failure_count += 1
+            self.total_time += duration
+
+    def get_metrics(self) -> Dict[str, float]:
+        total_requests = self.success_count + self.failure_count
+        return {
+            'success_rate': self.success_count / total_requests if total_requests > 0 else 0,
+            'average_time': self.total_time / total_requests if total_requests > 0 else 0,
+            'total_requests': total_requests,
+            'uptime': time.time() - self.start_time if self.start_time else 0
+        }
+
+# ----------------------- Health Check -----------------------
+
+async def health_check() -> Dict[str, bool]:
+    """Perform health check of critical components."""
+    health_status = {
+        'playwright_status': False,
+        'proxy_status': False,
+        'api_status': False,
+        'memory_status': False
+    }
+    
+    try:
+        # Check Playwright
+        if await setup_playwright():
+            health_status['playwright_status'] = True
+            
+        # Check proxy availability
+        proxy_manager = ProxyManager()
+        if await proxy_manager.get_next_proxy():
+            health_status['proxy_status'] = True
+            
+        # Check API status (assuming OpenAI)
+        try:
+            async with get_session() as session:
+                async with session.get('https://api.openai.com/v1/models') as response:
+                    if response.status == 200:
+                        health_status['api_status'] = True
+        except Exception:
+            pass
+            
+        # Check memory usage
+        import psutil
+        if psutil.virtual_memory().percent < 90:  # Less than 90% used
+            health_status['memory_status'] = True
+            
+    except Exception as e:
+        logger.error(f"Health check failed: {str(e)}")
+        
+    return health_status
+
+# ----------------------- Main Entry Point -----------------------
 
 if __name__ == "__main__":
-    main()
+    # Setup logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler("scraper.log"),
+            logging.StreamHandler()
+        ]
+    )
+    
+    # Initialize metrics
+    metrics = ScrapingMetrics()
+    
+    # Run health check
+    asyncio.run(health_check())
+    
+    # Start the application
+    try:
+        main()
+    except Exception as e:
+        logger.critical(f"Application failed to start: {str(e)}", exc_info=True)
+        st.error("Application failed to start. Please check the logs.")
 
