@@ -71,95 +71,112 @@ if not setup_playwright():
 # ----------------------- LLM Error Check -----------------------
 import openai
 
-Improved Error Page Detection Function
-
 def is_error_page(content: str) -> bool:
     """
-    Use the configured LLM to determine if webpage content is an error/rejection message.
+    Detect if the webpage content is an error/rejection message.
     Returns True if the content appears to be an error page, False otherwise.
     """
-    # Common error page keywords for initial filtering
-    error_keywords = [
-        "page not available",
-        "return to homepage",
+    # Define critical phrases that almost certainly indicate an error page
+    critical_phrases = [
+        "page you are trying to access is not available",
+        "return to the homepage",
         "web archive",
-        "having difficulty",
-        "access denied",
-        "blocked",
-        "robot",
-        "automated access",
-        "contact support",
-        "try again later",
-        "temporary error",
-        "cannot process",
-        "detection system",
-        "security check"
+        "having difficulty finding",
+        "contact the web",
+        "please return to",
+        "alternatively, you may",
     ]
     
-    # Quick keyword check
-    content_lower = content.lower()
-    keyword_matches = sum(1 for keyword in error_keywords if keyword in content_lower)
-    
-    # If multiple error keywords are found, consider it an error page
-    if keyword_matches >= 3:
-        return True
+    # Common patterns in error pages
+    error_patterns = [
+        r"page.*not available",
+        r"return to.*homepage",
+        r"web.*archive",
+        r"contact.*service",
+        r"previous version",
+        r"alternative.*navigate",
+        r"difficulty finding",
+        r"cannot access",
+        r"blocked.*access",
+    ]
 
+    # Check for exact matches of critical phrases
+    content_lower = content.lower().strip()
+    for phrase in critical_phrases:
+        if phrase in content_lower:
+            st.info(f"Error page detected by critical phrase: '{phrase}'")
+            return True
+
+    # Check for regex patterns
+    for pattern in error_patterns:
+        if re.search(pattern, content_lower, re.IGNORECASE):
+            st.info(f"Error page detected by pattern: '{pattern}'")
+            return True
+
+    # Check content length and characteristics
+    word_count = len(content_lower.split())
+    if word_count < 100:  # Error messages tend to be short
+        sentences = content_lower.split('.')
+        error_indicators = sum(1 for s in sentences if any(p in s for p in critical_phrases))
+        if error_indicators / len(sentences) > 0.3:  # If more than 30% of sentences contain error indicators
+            st.info("Error page detected by content analysis")
+            return True
+
+    # Use LLM for more complex cases
     try:
-        # Use the same LLM configuration as crawl4ai
         from crawl4ai.extraction_strategy import LLMExtractionStrategy
         from pydantic import BaseModel
 
-        class ErrorDetection(BaseModel):
+        class ErrorAnalysis(BaseModel):
             is_error: bool
-            confidence: float
+            reason: str
 
-        prompt = """Analyze the following webpage content and determine if it's an error/rejection page rather than actual content.
+        instruction = """Analyze if this is an error/rejection page instead of actual content.
+        Common signs of error pages:
+        1. Instructions to return to homepage
+        2. Mentions of web archives
+        3. Contact information for support
+        4. Page unavailability notices
+        5. References to navigation or browsing elsewhere
+        
+        Content to analyze: {content}
+        
+        Respond with a clear Yes/No and brief reason."""
 
-        Consider it an error/rejection page if it shows these patterns:
-        1. Mentions returning to homepage or main sections
-        2. References web archives or previous versions
-        3. Provides contact information for support/help
-        4. States the page is unavailable/inaccessible
-        5. Contains generic error messages
-        6. Suggests alternative navigation paths
-        7. Mentions access being denied or blocked
-        8. References robot/crawler detection
-        9. Contains anti-automation messaging
-        10. Lacks specific content related to the webpage's purpose
-
-        Consider it legitimate content if it contains:
-        1. Specific article text, news, or topic-related information
-        2. Actual publication content
-        3. Meaningful data relevant to the webpage's purpose
-        4. Detailed information about a specific topic
-
-        Webpage content for analysis:
-        {content}
-        """
-
-        error_detector = LLMExtractionStrategy(
+        error_analyzer = LLMExtractionStrategy(
             provider=st.secrets["MODEL"],
             api_token=st.secrets["OPENAI_API_KEY"],
-            schema=ErrorDetection.model_json_schema(),
+            schema=ErrorAnalysis.model_json_schema(),
             extraction_type="schema",
-            instruction=prompt,
+            instruction=instruction,
             extra_args={"temperature": 0.0}
         )
         
-        result = error_detector.extract(content)
+        result = error_analyzer.extract(content)
         
-        # Log the detection result for debugging
-        st.info(f"Error detection - Content length: {len(content)} chars")
-        st.info(f"Keyword matches: {keyword_matches}")
-        st.info(f"LLM detection result: {result}")
+        if result.get('is_error'):
+            st.info(f"Error page detected by LLM: {result.get('reason')}")
+            return True
+            
+        return False
         
-        return result.get('is_error', False)
     except Exception as e:
-        st.error(f"Error in LLM error check: {str(e)}")
-        # If LLM fails, fall back to keyword-based detection
-        return keyword_matches >= 3
+        st.warning(f"LLM analysis failed, falling back to pattern matching: {str(e)}")
+        # If more than 2 critical phrases are found, consider it an error page
+        matches = sum(1 for phrase in critical_phrases if phrase in content_lower)
+        return matches >= 2
 
-
+def handle_error_page(content: str) -> bool:
+    """
+    Helper function to handle error page detection and logging.
+    Returns True if error page is detected, False otherwise.
+    """
+    is_error = is_error_page(content)
+    if is_error:
+        st.warning("Error page detected. Content appears to be a rejection/error message:")
+        st.code(content[:200] + "..." if len(content) > 200 else content)  # Show first 200 chars
+        st.info("Initiating retry with alternative access method...")
+    return is_error
 
 # ----------------------- Proxy Collection -----------------------
 # We'll use ProxyBroker to collect proxies automatically.
