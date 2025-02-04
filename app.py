@@ -68,6 +68,36 @@ if not setup_playwright():
     st.error("Playwright setup failed. Cannot proceed with web scraping.")
     st.stop()
 
+# ----------------------- LLM Error Check -----------------------
+import openai
+
+def is_error_page(content: str) -> bool:
+    """
+    Use the LLM (via OpenAI) to check if the returned content indicates an error page.
+    The prompt instructs the model to return 'Yes' if the content appears to be an error page,
+    otherwise 'No'.
+    """
+    prompt = (
+        "Determine if the following webpage content is an error page message (e.g., a page stating that the page "
+        "is not available, has been moved, or is blocked) rather than the expected content. "
+        "Return 'Yes' if it is an error page, otherwise return 'No'.\n\n"
+        "Content:\n" + content
+    )
+    try:
+        response = openai.Completion.create(
+            engine="text-davinci-003",
+            prompt=prompt,
+            max_tokens=10,
+            temperature=0.0,
+        )
+        answer = response.choices[0].text.strip().lower()
+        st.info(f"LLM check result: {answer}")
+        return answer.startswith("yes")
+    except Exception as e:
+        st.error(f"Error in LLM error check: {str(e)}")
+        # If the LLM call fails, default to not considering it an error page
+        return False
+
 # ----------------------- Proxy Collection -----------------------
 # We'll use ProxyBroker to collect proxies automatically.
 try:
@@ -147,6 +177,7 @@ async def scrape_data(url: str, instruction: str, num_pages: int, all_pages: boo
         exclusion_patterns = re.compile(r'cookie|privacy policy|terms of service|advertisement', flags=re.IGNORECASE)
 
         for page in range(1, num_pages + 1):
+            # Construct page URL
             page_url = f"{url}?page={page}" if '?' in url else f"{url}/page/{page}"
             for attempt in range(3):  # Retry mechanism; first attempt without proxy, then with proxy if needed.
                 try:
@@ -170,22 +201,24 @@ async def scrape_data(url: str, instruction: str, num_pages: int, all_pages: boo
                     async with AsyncWebCrawler(config=current_browser_cfg) as crawler:
                         result = await crawler.arun(url=page_url, config=crawl_config)
                     
-                    if result.success:
-                        if result.extracted_content and result.extracted_content.strip():
-                            try:
-                                data = json.loads(result.extracted_content)
-                                # Filter out unwanted content
-                                filtered_data = [item for item in data if not exclusion_patterns.search(item["text"])]
-                                all_data.extend(filtered_data)
-                                break  # Successful extraction; exit retry loop for this page
-                            except json.JSONDecodeError:
-                                st.warning(f"Failed to decode JSON on page {page}. Retrying...")
-                                time.sleep(2)
-                        else:
-                            st.warning(f"No text returned on page {page} (attempt {attempt + 1}). Retrying with proxy if available...")
+                    # Use the LLM to check if the fetched content is an error page.
+                    if result.success and result.extracted_content and result.extracted_content.strip():
+                        if is_error_page(result.extracted_content):
+                            st.warning(f"LLM detected an error page on page {page} (attempt {attempt + 1}). Retrying...")
+                            time.sleep(2)
+                            continue
+
+                        try:
+                            data = json.loads(result.extracted_content)
+                            # Filter out unwanted content
+                            filtered_data = [item for item in data if not exclusion_patterns.search(item["text"])]
+                            all_data.extend(filtered_data)
+                            break  # Successful extraction; exit the retry loop for this page
+                        except json.JSONDecodeError:
+                            st.warning(f"Failed to decode JSON on page {page}. Retrying...")
                             time.sleep(2)
                     else:
-                        st.warning(f"Error on page {page}: {result.error_message}. Retrying...")
+                        st.warning(f"No valid content returned on page {page} (attempt {attempt + 1}). Retrying...")
                         time.sleep(2)
                 
                 except Exception as e:
@@ -197,9 +230,9 @@ async def scrape_data(url: str, instruction: str, num_pages: int, all_pages: boo
 
         if not all_data:
             st.warning(f"No data extracted from {url}. Possible reasons:")
-            st.info("- Page might be dynamically loaded")
-            st.info("- Content might require specific browser interactions")
-            st.info("- Potential anti-scraping measures in place")
+            st.info("- The page might be dynamically loaded")
+            st.info("- The content might require specific browser interactions")
+            st.info("- Anti-scraping measures might be in place (error page detected)")
 
         return all_data
     except Exception as e:
@@ -241,3 +274,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
