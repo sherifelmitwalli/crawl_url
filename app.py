@@ -73,28 +73,20 @@ import openai
 
 def is_error_page(content: str) -> bool:
     """
-    Check whether the returned content appears to be an error or rejection page.
-    First, compare against a known error message exactly.
-    If not an exact match, send the content to the LLM with instructions.
-    
-    The LLM is instructed that if the page indicates that automated scraping is rejected,
-    blocked, or not allowed, it should return 'Yes'. Otherwise, return 'No'.
+    Use the LLM to determine if the webpage content is a rejection message.
+    The prompt instructs the model to analyze whether the page appears to be a
+    generic error or anti-scraping message (for example, telling the user that the page
+    is not available, suggesting a return to the homepage, or instructing to use a web archive),
+    rather than genuine publication content.
     """
-    known_error_text = (
-        "The page you are trying to access is not available. Please return to the homepage to navigate through to our main content sections. "
-        "Alternatively, you may want to explore Parliament's Web Archive with access to previous versions of the parliamentary website and related websites. "
-        "If you are still having difficulty finding the page or document you need, please contact the Web and Intranet Service on giving full details on what you are looking for, along with the URL if possible."
-    )
-    
-    normalized_content = content.strip().lower()
-    if normalized_content == known_error_text.strip().lower():
-        return True
-
     prompt = (
-        "Determine if the following webpage content is an error or rejection page, meaning that the website is rejecting automated access or scraping. "
-        "If the content indicates that access is blocked, or that scraping is not allowed, or that the page is not available (for example, by stating "
-        "'the page you are trying to access is not available' or similar), then return 'Yes'. Otherwise, return 'No'.\n\n"
-        "Content:\n" + content
+        "Below is content from a webpage. Analyze the text and determine if it "
+        "appears to be a rejection or anti-scraping message rather than genuine content. "
+        "Such a rejection message typically is generic, instructs the user to return to the homepage, "
+        "refers to a web archive, or asks the user to contact support for further help, and lacks "
+        "specific publication details. If it appears to be a scraping rejection message, respond with 'Yes'. "
+        "Otherwise, respond with 'No'.\n\n"
+        "Webpage content:\n" + content
     )
     try:
         response = openai.Completion.create(
@@ -108,8 +100,10 @@ def is_error_page(content: str) -> bool:
         return answer.startswith("yes")
     except Exception as e:
         st.error(f"Error in LLM error check: {str(e)}")
-        # If the LLM call fails, default to not considering it an error page
+        # If the LLM call fails, default to not considering it an error page.
         return False
+
+
 
 # ----------------------- Proxy Collection -----------------------
 # We'll use ProxyBroker to collect proxies automatically.
