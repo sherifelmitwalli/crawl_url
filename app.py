@@ -71,37 +71,93 @@ if not setup_playwright():
 # ----------------------- LLM Error Check -----------------------
 import openai
 
+Improved Error Page Detection Function
+
 def is_error_page(content: str) -> bool:
     """
-    Use the LLM to determine if the webpage content is a rejection message.
-    The prompt instructs the model to analyze whether the page appears to be a
-    generic error or anti-scraping message (for example, telling the user that the page
-    is not available, suggesting a return to the homepage, or instructing to use a web archive),
-    rather than genuine publication content.
+    Use the configured LLM to determine if webpage content is an error/rejection message.
+    Returns True if the content appears to be an error page, False otherwise.
     """
-    prompt = (
-        "Below is content from a webpage. Analyze the text and determine if it "
-        "appears to be a rejection or anti-scraping message rather than genuine content. "
-        "Such a rejection message typically is generic, instructs the user to return to the homepage, "
-        "refers to a web archive, or asks the user to contact support for further help, and lacks "
-        "specific publication details. If it appears to be a scraping rejection message, respond with 'Yes'. "
-        "Otherwise, respond with 'No'.\n\n"
-        "Webpage content:\n" + content
-    )
+    # Common error page keywords for initial filtering
+    error_keywords = [
+        "page not available",
+        "return to homepage",
+        "web archive",
+        "having difficulty",
+        "access denied",
+        "blocked",
+        "robot",
+        "automated access",
+        "contact support",
+        "try again later",
+        "temporary error",
+        "cannot process",
+        "detection system",
+        "security check"
+    ]
+    
+    # Quick keyword check
+    content_lower = content.lower()
+    keyword_matches = sum(1 for keyword in error_keywords if keyword in content_lower)
+    
+    # If multiple error keywords are found, consider it an error page
+    if keyword_matches >= 3:
+        return True
+
     try:
-        response = openai.Completion.create(
-            engine="text-davinci-003",
-            prompt=prompt,
-            max_tokens=10,
-            temperature=0.0,
+        # Use the same LLM configuration as crawl4ai
+        from crawl4ai.extraction_strategy import LLMExtractionStrategy
+        from pydantic import BaseModel
+
+        class ErrorDetection(BaseModel):
+            is_error: bool
+            confidence: float
+
+        prompt = """Analyze the following webpage content and determine if it's an error/rejection page rather than actual content.
+
+        Consider it an error/rejection page if it shows these patterns:
+        1. Mentions returning to homepage or main sections
+        2. References web archives or previous versions
+        3. Provides contact information for support/help
+        4. States the page is unavailable/inaccessible
+        5. Contains generic error messages
+        6. Suggests alternative navigation paths
+        7. Mentions access being denied or blocked
+        8. References robot/crawler detection
+        9. Contains anti-automation messaging
+        10. Lacks specific content related to the webpage's purpose
+
+        Consider it legitimate content if it contains:
+        1. Specific article text, news, or topic-related information
+        2. Actual publication content
+        3. Meaningful data relevant to the webpage's purpose
+        4. Detailed information about a specific topic
+
+        Webpage content for analysis:
+        {content}
+        """
+
+        error_detector = LLMExtractionStrategy(
+            provider=st.secrets["MODEL"],
+            api_token=st.secrets["OPENAI_API_KEY"],
+            schema=ErrorDetection.model_json_schema(),
+            extraction_type="schema",
+            instruction=prompt,
+            extra_args={"temperature": 0.0}
         )
-        answer = response.choices[0].text.strip().lower()
-        st.info(f"LLM error check result: {answer}")
-        return answer.startswith("yes")
+        
+        result = error_detector.extract(content)
+        
+        # Log the detection result for debugging
+        st.info(f"Error detection - Content length: {len(content)} chars")
+        st.info(f"Keyword matches: {keyword_matches}")
+        st.info(f"LLM detection result: {result}")
+        
+        return result.get('is_error', False)
     except Exception as e:
         st.error(f"Error in LLM error check: {str(e)}")
-        # If the LLM call fails, default to not considering it an error page.
-        return False
+        # If LLM fails, fall back to keyword-based detection
+        return keyword_matches >= 3
 
 
 
