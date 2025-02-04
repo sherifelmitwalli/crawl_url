@@ -11,9 +11,11 @@ import time
 import random
 from typing import List, Dict
 
+# ----------------------- Helper Functions -----------------------
+
 def safe_run_command(command):
     """
-    Safely run a shell command with error handling
+    Safely run a shell command with error handling.
     """
     try:
         result = subprocess.run(
@@ -33,32 +35,23 @@ def safe_run_command(command):
 
 def setup_playwright():
     """
-    Comprehensive Playwright setup with multiple fallback methods
+    Comprehensive Playwright setup with multiple fallback methods.
     """
     st.info("Setting up Playwright...")
     
-    # List of potential installation methods
     install_methods = [
-        # Method 1: Direct pip install with playwright
         [sys.executable, "-m", "pip", "install", "playwright"],
-        
-        # Method 2: Using pip with upgrade
         [sys.executable, "-m", "pip", "install", "--upgrade", "playwright"],
-        
-        # Method 3: Using pip with force reinstall
         [sys.executable, "-m", "pip", "install", "--force-reinstall", "playwright"]
     ]
 
-    # Try different installation methods
     for method in install_methods:
         if safe_run_command(method):
-            # Attempt to install browsers
             browser_install_commands = [
                 [sys.executable, "-m", "playwright", "install"],
                 ["playwright", "install"],
                 [sys.executable, "-c", "from playwright.sync_api import sync_playwright; sync_playwright().install()"]
             ]
-            
             for browser_cmd in browser_install_commands:
                 try:
                     subprocess.run(browser_cmd, check=True)
@@ -75,7 +68,30 @@ if not setup_playwright():
     st.error("Playwright setup failed. Cannot proceed with web scraping.")
     st.stop()
 
-# Now import required libraries
+# ----------------------- Proxy Collection -----------------------
+# We'll use ProxyBroker to collect proxies automatically.
+try:
+    from proxybroker import Broker
+except ImportError:
+    st.error("ProxyBroker is not installed. Please install it with 'pip install proxybroker'.")
+    st.stop()
+
+async def fetch_proxies(limit: int = 10, timeout: int = 10) -> List[str]:
+    """
+    Use ProxyBroker to automatically find free HTTP/HTTPS proxies.
+    Returns a list of proxies in the format 'host:port'.
+    """
+    proxies = set()
+
+    async def save(proxy):
+        if proxy and proxy.host and proxy.port:
+            proxies.add(f"{proxy.host}:{proxy.port}")
+
+    broker = Broker(save, timeout=timeout)
+    await broker.find(types=['HTTP', 'HTTPS'], limit=limit)
+    return list(proxies)
+
+# ----------------------- Crawl4ai and Extraction -----------------------
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
 from crawl4ai.extraction_strategy import LLMExtractionStrategy
 from pydantic import BaseModel
@@ -85,9 +101,10 @@ class ExtractedText(BaseModel):
 
 async def scrape_data(url: str, instruction: str, num_pages: int, all_pages: bool) -> List[Dict[str, str]]:
     try:
+        # Enhance the instruction for better extraction
         enhanced_instruction = (
-            f"{instruction}\n\nEnsure the extracted text is relevant and excludes cookies, legal disclaimers,"
-            " advertisements, and UI elements such as navigation bars and footers. Extract meaningful page content only."
+            f"{instruction}\n\nEnsure the extracted text is relevant and excludes cookies, legal disclaimers, "
+            "advertisements, and UI elements such as navigation bars and footers. Extract meaningful page content only."
         )
 
         llm_strategy = LLMExtractionStrategy(
@@ -111,52 +128,85 @@ async def scrape_data(url: str, instruction: str, num_pages: int, all_pages: boo
             exclude_external_links=True,
         )
 
-        browser_cfg = BrowserConfig(
+        # Default browser configuration (without proxy)
+        default_browser_cfg = BrowserConfig(
             headless=True, 
             verbose=True,
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         )
 
-        async with AsyncWebCrawler(config=browser_cfg) as crawler:
-            all_data = []
-            exclusion_patterns = re.compile(r'cookie|privacy policy|terms of service|advertisement', flags=re.IGNORECASE)
+        # Automatically fetch a list of proxies to use as fallback
+        st.info("Collecting free proxies...")
+        proxies = await fetch_proxies(limit=10)
+        if proxies:
+            st.info(f"Found {len(proxies)} proxies.")
+        else:
+            st.warning("No proxies found. Will proceed without proxy fallback.")
 
-            for page in range(1, num_pages + 1):
-                page_url = f"{url}?page={page}" if '?' in url else f"{url}/page/{page}"
-                
-                for attempt in range(3):  # Retry mechanism
-                    try:
+        all_data = []
+        exclusion_patterns = re.compile(r'cookie|privacy policy|terms of service|advertisement', flags=re.IGNORECASE)
+
+        for page in range(1, num_pages + 1):
+            page_url = f"{url}?page={page}" if '?' in url else f"{url}/page/{page}"
+            for attempt in range(3):  # Retry mechanism; first attempt without proxy, then with proxy if needed.
+                try:
+                    # Use default config on first attempt, then a proxy config on subsequent attempts.
+                    if attempt == 0:
+                        current_browser_cfg = default_browser_cfg
+                    else:
+                        if proxies:
+                            selected_proxy = random.choice(proxies)
+                            st.info(f"Attempting page {page} with proxy: {selected_proxy}")
+                            current_browser_cfg = BrowserConfig(
+                                headless=True, 
+                                verbose=True,
+                                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                                proxy=selected_proxy  # Assumes BrowserConfig accepts a "proxy" parameter.
+                            )
+                        else:
+                            st.warning("No proxies available; retrying without proxy.")
+                            current_browser_cfg = default_browser_cfg
+
+                    async with AsyncWebCrawler(config=current_browser_cfg) as crawler:
                         result = await crawler.arun(url=page_url, config=crawl_config)
-                        
-                        if result.success:
+                    
+                    if result.success:
+                        if result.extracted_content and result.extracted_content.strip():
                             try:
                                 data = json.loads(result.extracted_content)
+                                # Filter out unwanted content
                                 filtered_data = [item for item in data if not exclusion_patterns.search(item["text"])]
                                 all_data.extend(filtered_data)
-                                break  # Successful, exit retry loop
+                                break  # Successful extraction; exit retry loop for this page
                             except json.JSONDecodeError:
                                 st.warning(f"Failed to decode JSON on page {page}. Retrying...")
                                 time.sleep(2)
                         else:
-                            st.warning(f"Error on page {page}: {result.error_message}. Retrying...")
-                    
-                    except Exception as e:
-                        st.error(f"Error processing page {page}: {str(e)}. Retrying...")
+                            st.warning(f"No text returned on page {page} (attempt {attempt + 1}). Retrying with proxy if available...")
+                            time.sleep(2)
+                    else:
+                        st.warning(f"Error on page {page}: {result.error_message}. Retrying...")
                         time.sleep(2)
                 
-                if not all_pages and page >= num_pages:
-                    break
+                except Exception as e:
+                    st.error(f"Error processing page {page}: {str(e)}. Retrying...")
+                    time.sleep(2)
+            
+            if not all_pages and page >= num_pages:
+                break
 
-            if not all_data:
-                st.warning(f"No data extracted from {url}. Possible reasons:")
-                st.info("- Page might be dynamically loaded")
-                st.info("- Content might require specific browser interactions")
-                st.info("- Potential anti-scraping measures in place")
+        if not all_data:
+            st.warning(f"No data extracted from {url}. Possible reasons:")
+            st.info("- Page might be dynamically loaded")
+            st.info("- Content might require specific browser interactions")
+            st.info("- Potential anti-scraping measures in place")
 
-            return all_data
+        return all_data
     except Exception as e:
         st.error(f"Unexpected error in scrape_data: {str(e)}")
         return []
+
+# ----------------------- Main Streamlit App -----------------------
 
 def main():
     st.title("AI-Assisted Web Scraping")
@@ -170,10 +220,9 @@ def main():
         if url_to_scrape and instruction_to_llm:
             with st.spinner("Scraping in progress..."):
                 try:
-                    # Use asyncio.run with a timeout
                     data = asyncio.run(asyncio.wait_for(
-                        scrape_data(url_to_scrape, instruction_to_llm, num_pages, all_pages), 
-                        timeout=120  # 2-minute timeout
+                        scrape_data(url_to_scrape, instruction_to_llm, num_pages, all_pages),
+                        timeout=180  # Adjust timeout as needed
                     ))
                     
                     if data:
