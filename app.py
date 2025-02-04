@@ -73,14 +73,27 @@ import openai
 
 def is_error_page(content: str) -> bool:
     """
-    Use the LLM (via OpenAI) to check if the returned content indicates an error page.
-    The prompt instructs the model to return 'Yes' if the content appears to be an error page,
-    otherwise 'No'.
+    Check whether the returned content appears to be an error or rejection page.
+    First, compare against a known error message exactly.
+    If not an exact match, send the content to the LLM with instructions.
+    
+    The LLM is instructed that if the page indicates that automated scraping is rejected,
+    blocked, or not allowed, it should return 'Yes'. Otherwise, return 'No'.
     """
+    known_error_text = (
+        "The page you are trying to access is not available. Please return to the homepage to navigate through to our main content sections. "
+        "Alternatively, you may want to explore Parliament's Web Archive with access to previous versions of the parliamentary website and related websites. "
+        "If you are still having difficulty finding the page or document you need, please contact the Web and Intranet Service on giving full details on what you are looking for, along with the URL if possible."
+    )
+    
+    normalized_content = content.strip().lower()
+    if normalized_content == known_error_text.strip().lower():
+        return True
+
     prompt = (
-        "Determine if the following webpage content is an error page message (e.g., a page stating that the page "
-        "is not available, has been moved, or is blocked) rather than the expected content. "
-        "Return 'Yes' if it is an error page, otherwise return 'No'.\n\n"
+        "Determine if the following webpage content is an error or rejection page, meaning that the website is rejecting automated access or scraping. "
+        "If the content indicates that access is blocked, or that scraping is not allowed, or that the page is not available (for example, by stating "
+        "'the page you are trying to access is not available' or similar), then return 'Yes'. Otherwise, return 'No'.\n\n"
         "Content:\n" + content
     )
     try:
@@ -91,7 +104,7 @@ def is_error_page(content: str) -> bool:
             temperature=0.0,
         )
         answer = response.choices[0].text.strip().lower()
-        st.info(f"LLM check result: {answer}")
+        st.info(f"LLM error check result: {answer}")
         return answer.startswith("yes")
     except Exception as e:
         st.error(f"Error in LLM error check: {str(e)}")
@@ -158,11 +171,12 @@ async def scrape_data(url: str, instruction: str, num_pages: int, all_pages: boo
             exclude_external_links=True,
         )
 
-        # Default browser configuration (without proxy)
+        # Updated browser configuration with a modern user agent and additional args to reduce detection.
         default_browser_cfg = BrowserConfig(
             headless=True, 
             verbose=True,
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
+            args=["--disable-blink-features=AutomationControlled"]
         )
 
         # Automatically fetch a list of proxies to use as fallback
@@ -191,7 +205,8 @@ async def scrape_data(url: str, instruction: str, num_pages: int, all_pages: boo
                             current_browser_cfg = BrowserConfig(
                                 headless=True, 
                                 verbose=True,
-                                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
+                                args=["--disable-blink-features=AutomationControlled"],
                                 proxy=selected_proxy  # Assumes BrowserConfig accepts a "proxy" parameter.
                             )
                         else:
@@ -201,10 +216,10 @@ async def scrape_data(url: str, instruction: str, num_pages: int, all_pages: boo
                     async with AsyncWebCrawler(config=current_browser_cfg) as crawler:
                         result = await crawler.arun(url=page_url, config=crawl_config)
                     
-                    # Use the LLM to check if the fetched content is an error page.
+                    # Check if the fetched content is valid and not an error or rejection page.
                     if result.success and result.extracted_content and result.extracted_content.strip():
                         if is_error_page(result.extracted_content):
-                            st.warning(f"LLM detected an error page on page {page} (attempt {attempt + 1}). Retrying...")
+                            st.warning(f"LLM detected a rejection/error page on page {page} (attempt {attempt + 1}). Retrying...")
                             time.sleep(2)
                             continue
 
@@ -232,7 +247,7 @@ async def scrape_data(url: str, instruction: str, num_pages: int, all_pages: boo
             st.warning(f"No data extracted from {url}. Possible reasons:")
             st.info("- The page might be dynamically loaded")
             st.info("- The content might require specific browser interactions")
-            st.info("- Anti-scraping measures might be in place (error page detected)")
+            st.info("- Anti-scraping measures might be in place (rejection/error page detected)")
 
         return all_data
     except Exception as e:
