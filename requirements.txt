@@ -5,3 +5,4 @@ pydantic
 crawl4ai
 nest-asyncio
 playwright
+proxybroker
